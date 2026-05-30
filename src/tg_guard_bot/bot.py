@@ -207,11 +207,14 @@ async def ask(
     record_ask_exchange(message, bot, store, question, answer)
 
 
-@router.message(Command("appeal"))
+@router.message(Command("appeal", "apell"))
 async def appeal(
     message: Message,
+    bot: Bot,
+    settings: Settings,
     ai_moderator: AiModerator | None,
     store: BotStore,
+    transcriber: LocalTranscriber | None,
 ) -> None:
     if not ai_moderator:
         await message.answer("Апелляции через ИИ пока выключены: не задан OPENAI_API_KEY.")
@@ -224,9 +227,11 @@ async def appeal(
         return
 
     disputed = message.reply_to_message
-    text = disputed.text or disputed.caption or ""
+    text = await appeal_message_text(disputed, bot, settings, transcriber)
     if not text:
-        await message.answer("Не вижу текста в спорном сообщении. Тут мне нечего пересматривать.")
+        await message.answer(
+            "Не вижу текста или распознаваемой речи в спорном сообщении. Тут мне нечего пересматривать."
+        )
         return
 
     thinking = await message.answer("Пересматриваю по-братски...")
@@ -244,6 +249,29 @@ async def appeal(
         return
 
     await thinking.edit_text(answer[:3900])
+
+
+async def appeal_message_text(
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    transcriber: LocalTranscriber | None,
+) -> str:
+    text = message.text or message.caption or ""
+    if transcriber:
+        try:
+            transcript = await transcribe_message_media(
+                message,
+                bot,
+                transcriber,
+                settings.max_transcription_file_bytes,
+            )
+        except Exception:
+            logger.exception("failed to transcribe appeal media message_id=%s", message.message_id)
+            transcript = None
+        if transcript:
+            text = "\n".join(part for part in (text, transcript) if part)
+    return text
 
 
 @router.message(Command("settings", "sintings", "sitings"))
