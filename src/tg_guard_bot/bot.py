@@ -23,7 +23,7 @@ from tg_guard_bot.history import ChatMessage, MessageHistory, format_context
 from tg_guard_bot.models import ModerationResult, Verdict
 from tg_guard_bot.rules import RuleConfig, RuleEngine
 from tg_guard_bot.state import WarningStore
-from tg_guard_bot.store import BotStore, StoredChatMessage, UserStats
+from tg_guard_bot.store import BotStore, ModerationCase, StoredChatMessage, UserStats
 from tg_guard_bot.transcription import LocalTranscriber, transcribe_message_media
 from tg_guard_bot.web_search import format_search_results, search_web
 
@@ -90,6 +90,7 @@ async def on_startup(bot: Bot, store: BotStore, settings: Settings) -> None:
             BotCommand(command="support", description="поддержать брата ответом на сообщение"),
             BotCommand(command="ask", description="задать вопрос ИИ с контекстом чата"),
             BotCommand(command="appeal", description="апелляция по спорному сообщению"),
+            BotCommand(command="report", description="донести на спорное сообщение"),
             BotCommand(command="warns", description="мои предупреждения"),
             BotCommand(command="resetstats", description="админ: обнулить счетчики"),
         ]
@@ -117,7 +118,7 @@ async def start(message: Message) -> None:
     await message.answer(
         "*Я на посту братства.*\n"
         "Проверяю чат, слушаю голосовые, помню контекст и иногда мягко хлопаю по плечу.\n\n"
-        "Команды: /settings, /stats, /rules, /ask, /appeal",
+        "Команды: /settings, /stats, /rules, /ask, /appeal, /report",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -213,6 +214,7 @@ async def appeal(
     bot: Bot,
     settings: Settings,
     ai_moderator: AiModerator | None,
+    warnings: WarningStore,
     store: BotStore,
     transcriber: LocalTranscriber | None,
 ) -> None:
@@ -227,7 +229,19 @@ async def appeal(
         return
 
     disputed = message.reply_to_message
-    text = await appeal_message_text(disputed, bot, settings, transcriber)
+    case = moderation_case_for_reply(store, message.chat.id, disputed.message_id)
+    if not case:
+        await message.answer(
+            "Апелляция работает только на сообщение, которому бот уже выдал страйк. "
+            "Ответь `/appeal` именно на застрайканное сообщение.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if case.resolved:
+        await message.answer("Этот страйк уже пересмотрен. Второй суд братства не собираем.")
+        return
+
+    text = case.text or await appeal_message_text(disputed, bot, settings, transcriber)
     if not text:
         await message.answer(
             "Не вижу текста или распознаваемой речи в спорном сообщении. Тут мне нечего пересматривать."
@@ -237,11 +251,7 @@ async def appeal(
     thinking = await message.answer("Пересматриваю по-братски...")
     try:
         context = format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30)))
-        author = (
-            f"{disputed.from_user.full_name} ({disputed.from_user.id})"
-            if disputed.from_user
-            else "unknown"
-        )
+        author = f"{case.user_name} ({case.user_id})"
         answer = await ai_moderator.appeal(text, context, author)
     except Exception:
         logger.exception("appeal failed chat=%s message=%s", message.chat.id, disputed.message_id)
@@ -249,6 +259,65 @@ async def appeal(
         return
 
     await thinking.edit_text(answer[:3900])
+    if answer.casefold().startswith("оправдано"):
+        await pardon_moderation_case(bot, store, warnings, case)
+
+
+@router.message(Command("report"))
+async def report(
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    ai_moderator: AiModerator | None,
+    warnings: WarningStore,
+    store: BotStore,
+    transcriber: LocalTranscriber | None,
+) -> None:
+    if not ai_moderator:
+        await message.answer("Доносы через ИИ пока выключены: не задан OPENAI_API_KEY.")
+        return
+    if not message.reply_to_message:
+        await message.answer(
+            "Ответь `/report` на спорное сообщение, и я проверю его с 30 сообщениями контекста.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    disputed = message.reply_to_message
+    if moderation_case_for_reply(store, message.chat.id, disputed.message_id):
+        await message.answer("На это сообщение страйк уже прилетал. Для пересмотра есть `/appeal`.")
+        return
+
+    text = await appeal_message_text(disputed, bot, settings, transcriber)
+    if not text:
+        await message.answer("Не вижу текста или распознаваемой речи в сообщении для доноса.")
+        return
+
+    thinking = await message.answer("Принимаю донос в братскую канцелярию...")
+    try:
+        context = format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30)))
+        author = (
+            f"{disputed.from_user.full_name} ({disputed.from_user.id})"
+            if disputed.from_user
+            else "unknown"
+        )
+        explanation = await ai_moderator.report(text, context, author)
+        moderation_result = await ai_moderator.moderate(
+            text,
+            format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30))),
+        )
+        moderation_result = soften_uncertain_ai_delete(moderation_result)
+    except Exception:
+        logger.exception("report failed chat=%s message=%s", message.chat.id, disputed.message_id)
+        await thinking.edit_text("Донос не обработался. Братская канцелярия временно в дыму.")
+        return
+
+    if disputed.from_user and moderation_result.is_violation and moderation_result.confidence >= 0.8:
+        await thinking.edit_text((explanation or "Страйк уместен.")[:3900])
+        await handle_violation(disputed, bot, settings, warnings, store, moderation_result, text=text)
+        return
+
+    await thinking.edit_text(explanation[:3900])
 
 
 async def appeal_message_text(
@@ -272,6 +341,17 @@ async def appeal_message_text(
         if transcript:
             text = "\n".join(part for part in (text, transcript) if part)
     return text
+
+
+def moderation_case_for_reply(
+    store: BotStore,
+    chat_id: int,
+    message_id: int,
+) -> ModerationCase | None:
+    return store.moderation_case_for_message(
+        chat_id,
+        message_id,
+    ) or store.moderation_case_for_warning(chat_id, message_id)
 
 
 @router.message(Command("settings", "sintings", "sitings"))
@@ -570,7 +650,11 @@ async def handle_violation(
     warnings: WarningStore,
     store: BotStore,
     result: ModerationResult,
+    text: str | None = None,
 ) -> None:
+    if not message.from_user:
+        return
+    case_text = text or message.text or message.caption or ""
     warning_count = warnings.add(message.chat.id, message.from_user.id)
     stats = store.add_violation(message.chat.id, message.from_user.id, message.from_user.full_name)
 
@@ -602,9 +686,22 @@ async def handle_violation(
                 result,
                 warning_count,
                 warning_message.message_id if warning_message else 0,
+                case_text,
             )
         except (TelegramBadRequest, TelegramForbiddenError):
             logger.warning("failed to notify admin chat id=%s", settings.admin_chat_id)
+
+    store.record_moderation_case(
+        chat_id=message.chat.id,
+        message_id=message.message_id,
+        user_id=message.from_user.id,
+        user_name=message.from_user.full_name,
+        text=case_text,
+        verdict=result.verdict.value,
+        confidence=result.confidence,
+        reasons=result.reasons,
+        warning_message_id=warning_message.message_id if warning_message else 0,
+    )
 
 
 async def notify_admins(
@@ -614,10 +711,11 @@ async def notify_admins(
     result: ModerationResult,
     warning_count: int,
     warning_message_id: int,
+    text: str | None = None,
 ) -> None:
     user = message.from_user
     user_label = md_escape(user.full_name) if user else "unknown"
-    text = message.text or message.caption or ""
+    text = text if text is not None else message.text or message.caption or ""
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -689,26 +787,22 @@ async def admin_ok(callback: CallbackQuery, bot: Bot, store: BotStore, warnings:
         await callback.answer("Старое уведомление: не хватает данных для отката", show_alert=True)
         return
 
-    _, chat_id_text, _message_id_text, user_id_text, warning_message_id_text = parts[:5]
+    _, chat_id_text, message_id_text, user_id_text, warning_message_id_text = parts[:5]
     chat_id = int(chat_id_text)
+    message_id = int(message_id_text)
     user_id = int(user_id_text)
     warning_message_id = int(warning_message_id_text)
-    user_name = await user_display_name(bot, chat_id, user_id)
-
-    warnings.rollback(chat_id, user_id)
-    store.rollback_violation(chat_id, user_id, user_name)
-
-    if warning_message_id:
-        with suppress(TelegramBadRequest, TelegramForbiddenError):
-            await bot.delete_message(chat_id, warning_message_id)
-
-    with suppress(TelegramBadRequest, TelegramForbiddenError):
-        await bot.send_message(
-            chat_id,
-            f"*{md_escape(user_name)}, апелляция принята.*\n"
-            "Бот перегнул палку, счетчик откатил. Братство приносит извинения и выдыхает.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+    case = store.moderation_case_for_message(chat_id, message_id)
+    if case:
+        await pardon_moderation_case(bot, store, warnings, case)
+    else:
+        user_name = await user_display_name(bot, chat_id, user_id)
+        warnings.rollback(chat_id, user_id)
+        store.rollback_violation(chat_id, user_id, user_name)
+        if warning_message_id:
+            with suppress(TelegramBadRequest, TelegramForbiddenError):
+                await bot.delete_message(chat_id, warning_message_id)
+        await send_pardon_message(bot, chat_id, user_name)
 
     if callback.message:
         with suppress(TelegramBadRequest, TelegramForbiddenError):
@@ -745,6 +839,31 @@ async def try_mute(message: Message, minutes: int) -> None:
         )
     except (TelegramBadRequest, TelegramForbiddenError):
         pass
+
+
+async def pardon_moderation_case(
+    bot: Bot,
+    store: BotStore,
+    warnings: WarningStore,
+    case: ModerationCase,
+) -> None:
+    warnings.rollback(case.chat_id, case.user_id)
+    store.rollback_violation(case.chat_id, case.user_id, case.user_name)
+    store.mark_moderation_case_resolved(case.chat_id, case.message_id)
+    if case.warning_message_id:
+        with suppress(TelegramBadRequest, TelegramForbiddenError):
+            await bot.delete_message(case.chat_id, case.warning_message_id)
+    await send_pardon_message(bot, case.chat_id, case.user_name)
+
+
+async def send_pardon_message(bot: Bot, chat_id: int, user_name: str) -> None:
+    with suppress(TelegramBadRequest, TelegramForbiddenError):
+        await bot.send_message(
+            chat_id,
+            f"*{md_escape(user_name)}, апелляция принята.*\n"
+            "Бот перегнул палку, счетчик откатил. Братство приносит извинения и выдыхает.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
 
 async def safe_answer(message: Message, text: str) -> Message | None:

@@ -41,6 +41,21 @@ class StoredChatMessage:
     created_at: str
 
 
+@dataclass
+class ModerationCase:
+    chat_id: int
+    message_id: int
+    user_id: int
+    user_name: str
+    text: str
+    verdict: str
+    confidence: float
+    reasons: list[str]
+    warning_message_id: int = 0
+    created_at: str = ""
+    resolved: bool = False
+
+
 class BotStore:
     def __init__(self, path: str) -> None:
         self.path = Path(path)
@@ -48,6 +63,7 @@ class BotStore:
         self.user_stats: dict[str, dict[str, UserStats]] = {}
         self.chat_history: dict[str, list[StoredChatMessage]] = {}
         self.ass_votes: dict[str, dict[str, dict[str, str]]] = {}
+        self.moderation_cases: dict[str, dict[str, ModerationCase]] = {}
         self.load()
 
     def load(self) -> None:
@@ -70,6 +86,12 @@ class BotStore:
             for chat_id, messages in payload.get("chat_history", {}).items()
         }
         self.ass_votes = payload.get("ass_votes", {})
+        self.moderation_cases = {
+            chat_id: {
+                message_id: ModerationCase(**case) for message_id, case in cases.items()
+            }
+            for chat_id, cases in payload.get("moderation_cases", {}).items()
+        }
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +108,10 @@ class BotStore:
                 for chat_id, messages in self.chat_history.items()
             },
             "ass_votes": self.ass_votes,
+            "moderation_cases": {
+                chat_id: {message_id: asdict(case) for message_id, case in cases.items()}
+                for chat_id, cases in self.moderation_cases.items()
+            },
         }
         temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -221,6 +247,63 @@ class BotStore:
 
     def ass_votes_for(self, chat_id: int, day: str) -> dict[str, str]:
         return self.ass_votes.get(str(chat_id), {}).get(day, {})
+
+    def record_moderation_case(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        user_name: str,
+        text: str,
+        verdict: str,
+        confidence: float,
+        reasons: list[str],
+        warning_message_id: int,
+    ) -> ModerationCase:
+        chat_key = str(chat_id)
+        message_key = str(message_id)
+        self.moderation_cases.setdefault(chat_key, {})
+        case = ModerationCase(
+            chat_id=chat_id,
+            message_id=message_id,
+            user_id=user_id,
+            user_name=user_name,
+            text=text,
+            verdict=verdict,
+            confidence=confidence,
+            reasons=reasons,
+            warning_message_id=warning_message_id,
+            created_at=now_iso(),
+        )
+        self.moderation_cases[chat_key][message_key] = case
+        self.moderation_cases[chat_key] = dict(
+            list(self.moderation_cases[chat_key].items())[-200:]
+        )
+        self.save()
+        return case
+
+    def moderation_case_for_message(
+        self,
+        chat_id: int,
+        message_id: int,
+    ) -> ModerationCase | None:
+        return self.moderation_cases.get(str(chat_id), {}).get(str(message_id))
+
+    def moderation_case_for_warning(
+        self,
+        chat_id: int,
+        warning_message_id: int,
+    ) -> ModerationCase | None:
+        for case in self.moderation_cases.get(str(chat_id), {}).values():
+            if case.warning_message_id == warning_message_id:
+                return case
+        return None
+
+    def mark_moderation_case_resolved(self, chat_id: int, message_id: int) -> None:
+        case = self.moderation_case_for_message(chat_id, message_id)
+        if case:
+            case.resolved = True
+            self.save()
 
     def record_message(
         self,

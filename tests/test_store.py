@@ -31,3 +31,25 @@ def test_store_rolls_back_violation(tmp_path) -> None:
 
     assert stats.all_violations == 0
     assert sum(stats.daily_violations.values()) == 0
+
+
+def test_store_records_moderation_case(tmp_path) -> None:
+    store = BotStore(str(tmp_path / "state.json"))
+
+    store.record_moderation_case(
+        chat_id=1,
+        message_id=10,
+        user_id=2,
+        user_name="Rodion",
+        text="bad",
+        verdict="review",
+        confidence=0.7,
+        reasons=["reason"],
+        warning_message_id=11,
+    )
+    case = store.moderation_case_for_message(1, 10)
+
+    assert case is not None
+    assert case.user_id == 2
+    assert case.warning_message_id == 11
+    assert store.moderation_case_for_warning(1, 11) == case
