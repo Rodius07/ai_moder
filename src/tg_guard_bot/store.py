@@ -13,6 +13,7 @@ class ChatRuntimeSettings:
     ask_context_limit: int = 20
     ask_web_enabled: bool = True
     ask_web_results: int = 4
+    ai_model: str | None = None
     silent_support_hours: int = 72
     anti_bore_enabled: bool = True
     last_daily_stats_date: str | None = None
@@ -138,6 +139,15 @@ class BotStore:
             settings.silent_support_hours = clamp(value, 1, 24 * 30)
         elif name == "anti_bore":
             settings.anti_bore_enabled = bool(value)
+        else:
+            raise ValueError(f"Unknown setting: {name}")
+        self.save()
+        return settings
+
+    def update_text_setting(self, chat_id: int, name: str, value: str) -> ChatRuntimeSettings:
+        settings = self.settings_for(chat_id)
+        if name == "ai_model":
+            settings.ai_model = value.strip() or None
         else:
             raise ValueError(f"Unknown setting: {name}")
         self.save()

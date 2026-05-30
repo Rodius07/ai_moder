@@ -13,6 +13,14 @@ def test_store_updates_runtime_settings(tmp_path) -> None:
     assert store.settings_for(1).silent_support_hours == 48
 
 
+def test_store_updates_ai_model(tmp_path) -> None:
+    store = BotStore(str(tmp_path / "state.json"))
+
+    settings = store.update_text_setting(1, "ai_model", "anthropic/claude-sonnet-latest")
+
+    assert settings.ai_model == "anthropic/claude-sonnet-latest"
+
+
 def test_store_tracks_daily_and_all_time_violations(tmp_path) -> None:
     store = BotStore(str(tmp_path / "state.json"))
 

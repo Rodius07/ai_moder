@@ -136,6 +136,7 @@ async def rules(message: Message, settings: Settings, store: BotStore) -> None:
         f"- запрещенные домены: `{domains}`\n"
         f"- контекст модерации: `{runtime.moderation_context_limit}` сообщений\n"
         f"- контекст /ask: `{runtime.ask_context_limit}` сообщений\n"
+        f"- модель ИИ: `{runtime.ai_model or settings.openai_model}`\n"
         f"- авто-поддержка молчащих: `{runtime.silent_support_hours}` часов\n"
         f"- речь в аудио/видео: `{'включена' if settings.enable_local_transcription else 'выключена'}`\n"
         f"- флуд: больше {settings.flood_max_messages} сообщений за "
@@ -200,7 +201,14 @@ async def ask(
         current_time = datetime.now(ZoneInfo("Europe/Moscow")).strftime(
             "%Y-%m-%d %H:%M:%S MSK, %A"
         )
-        answer = await ai_moderator.answer(question, context, asker, web_context, current_time)
+        answer = await ai_moderator.answer(
+            question,
+            context,
+            asker,
+            web_context,
+            current_time,
+            runtime.ai_model,
+        )
     except Exception:
         await thinking.edit_text("Не получилось получить ответ ИИ. Попробуйте позже.")
         return
@@ -252,7 +260,8 @@ async def appeal(
     try:
         context = format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30)))
         author = f"{case.user_name} ({case.user_id})"
-        answer = await ai_moderator.appeal(text, context, author)
+        runtime = store.settings_for(message.chat.id)
+        answer = await ai_moderator.appeal(text, context, author, runtime.ai_model)
     except Exception:
         logger.exception("appeal failed chat=%s message=%s", message.chat.id, disputed.message_id)
         await thinking.edit_text("Не получилось пересмотреть. ИИ сейчас присел на корточки.")
@@ -301,10 +310,12 @@ async def report(
             if disputed.from_user
             else "unknown"
         )
-        explanation = await ai_moderator.report(text, context, author)
+        runtime = store.settings_for(message.chat.id)
+        explanation = await ai_moderator.report(text, context, author, runtime.ai_model)
         moderation_result = await ai_moderator.moderate(
             text,
             format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30))),
+            runtime.ai_model,
         )
         moderation_result = soften_uncertain_ai_delete(moderation_result)
     except Exception:
@@ -359,7 +370,11 @@ async def settings_menu(message: Message, command: CommandObject, store: BotStor
     args = (command.args or "").strip().split()
     if len(args) >= 2:
         try:
-            runtime = store.update_setting(message.chat.id, normalize_setting_name(args[0]), int(args[1]))
+            setting_name = normalize_setting_name(args[0])
+            if setting_name == "ai_model":
+                runtime = store.update_text_setting(message.chat.id, setting_name, args[1])
+            else:
+                runtime = store.update_setting(message.chat.id, setting_name, int(args[1]))
         except (ValueError, TypeError):
             await message.answer(settings_help(store.settings_for(message.chat.id)))
             return
@@ -509,6 +524,15 @@ async def process_group_message(
     if not message.from_user or message.from_user.is_bot:
         return
 
+    if is_forwarded_message(message):
+        logger.info(
+            "skip moderation for forwarded post chat=%s user=%s message=%s",
+            message.chat.id,
+            message.from_user.id,
+            message.message_id,
+        )
+        return
+
     text = message.text or message.caption or ""
     if transcriber:
         try:
@@ -573,6 +597,7 @@ async def process_group_message(
                         persisted_context_messages[-runtime.moderation_context_limit :]
                     )
                 ),
+                runtime.ai_model,
             )
         except Exception:
             ai_result = ModerationResult(
@@ -611,7 +636,7 @@ async def process_group_message(
         return
 
     try:
-        await handle_violation(message, bot, settings, warnings, store, result)
+        await handle_violation(message, bot, settings, warnings, store, result, text=text)
     finally:
         history.discard_last(message.chat.id, current_history_message)
         store.discard_last_message(message.chat.id, message.from_user.id, text)
@@ -643,6 +668,15 @@ def soften_uncertain_ai_delete(result: ModerationResult) -> ModerationResult:
     return result
 
 
+def is_forwarded_message(message: Message) -> bool:
+    return bool(
+        getattr(message, "forward_origin", None)
+        or getattr(message, "forward_from", None)
+        or getattr(message, "forward_from_chat", None)
+        or getattr(message, "forward_sender_name", None)
+    )
+
+
 async def handle_violation(
     message: Message,
     bot: Bot,
@@ -657,15 +691,6 @@ async def handle_violation(
     case_text = text or message.text or message.caption or ""
     warning_count = warnings.add(message.chat.id, message.from_user.id)
     stats = store.add_violation(message.chat.id, message.from_user.id, message.from_user.full_name)
-
-    should_delete = (
-        settings.delete_high_confidence
-        and result.verdict in {Verdict.DELETE, Verdict.MUTE}
-        and result.confidence >= 0.8
-    )
-
-    if should_delete:
-        await try_delete(message)
 
     if result.verdict is Verdict.MUTE or warning_count >= settings.max_warnings_before_mute:
         await try_mute(message, settings.mute_minutes)
@@ -896,6 +921,9 @@ def normalize_setting_name(name: str) -> str:
         "интернет": "ask_web",
         "web_results": "ask_web_results",
         "results": "ask_web_results",
+        "model": "ai_model",
+        "ai_model": "ai_model",
+        "модель": "ai_model",
         "silent": "silent_hours",
         "silent_hours": "silent_hours",
         "молчуны": "silent_hours",
@@ -917,6 +945,7 @@ def settings_help(runtime) -> str:
 
         Контекст модерации: `{runtime.moderation_context_limit}` сообщений
         Контекст `/ask`: `{runtime.ask_context_limit}` сообщений
+        Модель ИИ: `{runtime.ai_model or 'из .env'}`
         Интернет для `/ask`: `{'включен' if runtime.ask_web_enabled else 'выключен'}`
         Web-результатов для `/ask`: `{runtime.ask_web_results}`
         Авто-поддержка молчащих: `{runtime.silent_support_hours}` часов
@@ -925,6 +954,8 @@ def settings_help(runtime) -> str:
         *Команды настройки*
         `/settings mod 15` - сколько сообщений давать модерации
         `/settings ask 20` - сколько сообщений видит `/ask`
+        `/settings model openai/gpt-5-mini` - пример OpenAI
+        `/settings model anthropic/claude-sonnet-latest` - пример Anthropic
         `/settings web 1` - включить интернет для `/ask`
         `/settings web 0` - выключить интернет для `/ask`
         `/settings results 4` - сколько web-результатов давать `/ask`
@@ -1184,13 +1215,7 @@ def creative_violation_note(
     stats: UserStats,
 ) -> str:
     reason = md_escape("; ".join(result.reasons) or "форма сообщения поехала боком")
-    variants = [
-        "Брат, тут очко чата слегка сжалось. Мысль можно оставить, наезд лучше выдохнуть.",
-        "Стоп-кран братства. Формулировка пошла в бетон, а мы идем к разжатости.",
-        "Братский свисток: рофл рофлом, но это уже цепляет человека, а не ситуацию.",
-        "Сообщение ушло на разминку к внутреннему терминатору. Давай вернем человеческую версию.",
-    ]
-    note = random.choice(variants)
+    note = random.choice(VIOLATION_MESSAGES)
     return (
         f"*{md_escape(note)}*\n"
         f"Причина: `{reason}`\n"
@@ -1416,6 +1441,22 @@ SUPPORT_KEYWORDS = [
     "нормально всё будет",
     "не переживай",
     "ты не один",
+]
+
+
+VIOLATION_MESSAGES = [
+    "Брат, тут очко чата слегка сжалось. Мысль можно оставить, наезд лучше выдохнуть.",
+    "Стоп-кран братства. Формулировка пошла в бетон, а мы идем к разжатости.",
+    "Братский свисток: рофл рофлом, но это уже цепляет человека, а не ситуацию.",
+    "Сообщение ушло на разминку к внутреннему терминатору. Давай вернем человеческую версию.",
+    "Внутренний бетон заскрипел. Переформулируй так, чтобы брат остался братом.",
+    "Осторожно, словесная штанга пошла не на мышцы, а по человеку. Снимаем вес.",
+    "Братский барометр показал зажим. Тут лучше докинуть воздуха, а не давления.",
+    "Фраза свернула с рофла на кочку. Возвращаемся на дорогу нормального человека.",
+    "Чат чуть присел от напряжения. Давай без удара по своим.",
+    "Комиссия по разжатости просит версию без бетонной арматуры.",
+    "Слишком много нажима, мало братства. Перекинь мысль мягче.",
+    "Тут не терминаторская арена, а братский чат. Выдыхаем и говорим словами через рот.",
 ]
 
 

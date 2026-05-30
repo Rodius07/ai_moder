@@ -16,11 +16,14 @@ SYSTEM_PROMPT = """
 4. Нейтральные вопросы, обычный спор и дружеский тон разрешены.
 5. Всегда оценивай текущее сообщение с учетом последних сообщений контекста.
 6. Если участники пишут по одному слову, собирай смысл из всей короткой цепочки.
-7. Не наказывай за отдельное грубое слово, если из контекста видно, что это дружеский
-   рофл без унижения, угрозы или давления.
+7. Мат сам по себе разрешен. Рассказ с матом, эмоциональная речь, пересказ чужих слов,
+   грубая самоирония и ругань в воздух не являются нарушением.
 8. Не считай нарушение персональным, если в текущем сообщении нет явного адресата:
    имени участника, ответа на конкретного участника, местоимений с очевидной отсылкой
    из ближайшего контекста или прямой атаки на человека.
+   В этом чате защищаем от персональных оскорблений прежде всего Родиона, Данила
+   и Арсения. Оскорбления или мат, не относящиеся к Родиону, Данилу или Арсению,
+   не блокируй автоматически.
 9. Обсуждение здоровья, психики, тела, гормонов, тестостерона, усталости, тревоги,
    сексуальности и похожих тем разрешено, если это не используется как унижение
    конкретного участника.
@@ -69,9 +72,14 @@ class AiModerator:
             default_headers=default_headers or None,
         )
 
-    async def moderate(self, message_text: str, context: str) -> ModerationResult:
+    async def moderate(
+        self,
+        message_text: str,
+        context: str,
+        model: str | None = None,
+    ) -> ModerationResult:
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=model or self.model,
             temperature=0,
             response_format={"type": "json_object"},
             messages=[
@@ -99,16 +107,20 @@ class AiModerator:
         asker: str = "",
         web_context: str = "",
         current_time: str = "",
+        model: str | None = None,
     ) -> str:
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=model or self.model,
             temperature=0.3,
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "Ты полезный Telegram-ассистент братского чата. Отвечай кратко, "
-                        "ясно, дружелюбно и учитывай контекст переписки, если он дан. "
+                        "ясно, дружелюбно, креативно и в стиле чата: братский вайб, живые "
+                        "формулировки, немного рофла, без канцелярита и без морализаторства. "
+                        "Можно использовать внутренние мемы про разжатость, бетон и нормальную "
+                        "психику, если это уместно. Учитывай контекст переписки, если он дан. "
                         "Если вопрос содержит 'мой', 'мне', 'меня' или 'я', относись к автору "
                         "вопроса, а не к последнему человеку из контекста. Если дан web-контекст, "
                         "используй его для фактов о текущих событиях и добавляй ссылки, когда они "
@@ -136,9 +148,15 @@ class AiModerator:
         )
         return (response.choices[0].message.content or "").strip()
 
-    async def appeal(self, message_text: str, context: str, author: str = "") -> str:
+    async def appeal(
+        self,
+        message_text: str,
+        context: str,
+        author: str = "",
+        model: str | None = None,
+    ) -> str:
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=model or self.model,
             temperature=0.2,
             messages=[
                 {
@@ -170,9 +188,15 @@ class AiModerator:
         )
         return (response.choices[0].message.content or "").strip()
 
-    async def report(self, message_text: str, context: str, author: str = "") -> str:
+    async def report(
+        self,
+        message_text: str,
+        context: str,
+        author: str = "",
+        model: str | None = None,
+    ) -> str:
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=model or self.model,
             temperature=0.2,
             messages=[
                 {
