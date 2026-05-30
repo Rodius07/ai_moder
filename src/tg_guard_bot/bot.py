@@ -16,16 +16,18 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BotCommand
 from aiogram.types import CallbackQuery, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile
 
 from tg_guard_bot.ai import AiModerator
 from tg_guard_bot.config import Settings
 from tg_guard_bot.history import ChatMessage, MessageHistory, format_context
+from tg_guard_bot.image_generation import ImageGenerator
 from tg_guard_bot.models import ModerationResult, Verdict
 from tg_guard_bot.rules import RuleConfig, RuleEngine
 from tg_guard_bot.state import WarningStore
 from tg_guard_bot.store import BotStore, ModerationCase, StoredChatMessage, UserStats
 from tg_guard_bot.transcription import LocalTranscriber, transcribe_message_media
-from tg_guard_bot.web_search import format_search_results, search_web
+from tg_guard_bot.web_search import format_search_results, search_web_deep
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -66,6 +68,18 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         if settings.enable_local_transcription
         else None
     )
+    image_generator = (
+        ImageGenerator(
+            api_key=settings.openai_api_key,
+            model=settings.openrouter_image_model,
+            aspect_ratio=settings.openrouter_image_aspect_ratio,
+            image_size=settings.openrouter_image_size,
+            site_url=settings.openrouter_site_url,
+            app_name=settings.openrouter_app_name,
+        )
+        if settings.openai_api_key
+        else None
+    )
 
     dp = Dispatcher(
         settings=settings,
@@ -75,6 +89,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         history=history,
         store=store,
         transcriber=transcriber,
+        image_generator=image_generator,
     )
     dp.startup.register(on_startup)
     dp.include_router(router)
@@ -89,6 +104,7 @@ async def on_startup(bot: Bot, store: BotStore, settings: Settings) -> None:
             BotCommand(command="stats", description="статистика нарушений и разжатость"),
             BotCommand(command="support", description="поддержать брата ответом на сообщение"),
             BotCommand(command="ask", description="задать вопрос ИИ с контекстом чата"),
+            BotCommand(command="image", description="сгенерировать картинку через OpenRouter"),
             BotCommand(command="appeal", description="апелляция по спорному сообщению"),
             BotCommand(command="report", description="донести на спорное сообщение"),
             BotCommand(command="warns", description="мои предупреждения"),
@@ -118,7 +134,7 @@ async def start(message: Message) -> None:
     await message.answer(
         "*Я на посту братства.*\n"
         "Проверяю чат, слушаю голосовые, помню контекст и иногда мягко хлопаю по плечу.\n\n"
-        "Команды: /settings, /stats, /rules, /ask, /appeal, /report",
+        "Команды: /settings, /stats, /rules, /ask, /image, /appeal, /report",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -137,6 +153,8 @@ async def rules(message: Message, settings: Settings, store: BotStore) -> None:
         f"- контекст модерации: `{runtime.moderation_context_limit}` сообщений\n"
         f"- контекст /ask: `{runtime.ask_context_limit}` сообщений\n"
         f"- модель ИИ: `{runtime.ai_model or settings.openai_model}`\n"
+        f"- модель картинок: `{runtime.image_model or settings.openrouter_image_model}`\n"
+        f"- web-поиск /ask: `{runtime.ask_web_mode}`\n"
         f"- авто-поддержка молчащих: `{runtime.silent_support_hours}` часов\n"
         f"- речь в аудио/видео: `{'включена' if settings.enable_local_transcription else 'выключена'}`\n"
         f"- флуд: больше {settings.flood_max_messages} сообщений за "
@@ -186,18 +204,27 @@ async def ask(
         )
         asker = f"{message.from_user.full_name} ({message.from_user.id})" if message.from_user else ""
         web_context = ""
-        if runtime.ask_web_enabled:
+        use_openrouter_web = should_use_openrouter_web(runtime.ask_web_mode, question, ai_moderator)
+        use_local_web = should_use_local_web(runtime.ask_web_mode, question, ai_moderator)
+        if use_local_web:
             try:
-                web_results = await search_web(question, runtime.ask_web_results)
+                web_results = await search_web_deep(question, runtime.ask_web_results)
                 web_context = format_search_results(web_results)
                 logger.info(
-                    "ask web search chat=%s results=%s query=%r",
+                    "ask local web search chat=%s results=%s query=%r",
                     message.chat.id,
                     len(web_results),
                     question[:120],
                 )
             except Exception:
                 logger.exception("ask web search failed chat=%s query=%r", message.chat.id, question)
+        elif use_openrouter_web:
+            logger.info(
+                "ask openrouter web tool enabled chat=%s mode=%s query=%r",
+                message.chat.id,
+                runtime.ask_web_mode,
+                question[:120],
+            )
         current_time = datetime.now(ZoneInfo("Europe/Moscow")).strftime(
             "%Y-%m-%d %H:%M:%S MSK, %A"
         )
@@ -208,12 +235,56 @@ async def ask(
             web_context,
             current_time,
             runtime.ai_model,
+            use_openrouter_web,
+            runtime.ask_web_results,
         )
     except Exception:
         await thinking.edit_text("Не получилось получить ответ ИИ. Попробуйте позже.")
         return
-    await thinking.edit_text(answer[:3900])
+    await edit_text_markdown(thinking, answer[:3900])
     record_ask_exchange(message, bot, store, question, answer)
+
+
+@router.message(Command("image", "img"))
+async def image(
+    message: Message,
+    command: CommandObject,
+    image_generator: ImageGenerator | None,
+    settings: Settings,
+    store: BotStore,
+) -> None:
+    prompt = (command.args or "").strip()
+    if not prompt:
+        await message.answer(
+            "Напиши промпт после команды: `/image братский стикер про разжатость, комикс`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if not image_generator:
+        await message.answer("Картинки выключены: нужен `OPENAI_API_KEY` от OpenRouter.")
+        return
+
+    thinking = await message.answer("Рисую через OpenRouter...")
+    runtime = store.settings_for(message.chat.id)
+    model = runtime.image_model or settings.openrouter_image_model
+    try:
+        image_bytes, filename = await image_generator.generate(prompt, model)
+    except Exception:
+        logger.exception("image generation failed chat=%s model=%s", message.chat.id, model)
+        await thinking.edit_text(
+            "Картинка не родилась. Проверь, что модель поддерживает image output "
+            "и на OpenRouter хватает кредитов."
+        )
+        return
+
+    caption = f"Собрал по запросу: {md_escape(prompt[:900])}"
+    await message.answer_photo(
+        BufferedInputFile(image_bytes, filename=filename),
+        caption=caption[:1024],
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    with suppress(TelegramBadRequest, TelegramForbiddenError):
+        await thinking.delete()
 
 
 @router.message(Command("appeal", "apell"))
@@ -371,8 +442,12 @@ async def settings_menu(message: Message, command: CommandObject, store: BotStor
     if len(args) >= 2:
         try:
             setting_name = normalize_setting_name(args[0])
-            if setting_name == "ai_model":
-                runtime = store.update_text_setting(message.chat.id, setting_name, args[1])
+            if setting_name in {"ai_model", "image_model", "ask_web_mode"}:
+                runtime = store.update_text_setting(
+                    message.chat.id,
+                    setting_name,
+                    " ".join(args[1:]),
+                )
             else:
                 runtime = store.update_setting(message.chat.id, setting_name, int(args[1]))
         except (ValueError, TypeError):
@@ -927,6 +1002,13 @@ async def safe_answer(message: Message, text: str) -> Message | None:
         return None
 
 
+async def edit_text_markdown(message: Message, text: str) -> None:
+    try:
+        await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    except TelegramBadRequest:
+        await message.edit_text(text, disable_web_page_preview=True)
+
+
 async def user_display_name(bot: Bot, chat_id: int, user_id: int) -> str:
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -953,6 +1035,14 @@ def normalize_setting_name(name: str) -> str:
         "model": "ai_model",
         "ai_model": "ai_model",
         "модель": "ai_model",
+        "image": "image_model",
+        "img": "image_model",
+        "image_model": "image_model",
+        "картинки": "image_model",
+        "webmode": "ask_web_mode",
+        "web_mode": "ask_web_mode",
+        "search": "ask_web_mode",
+        "поиск": "ask_web_mode",
         "silent": "silent_hours",
         "silent_hours": "silent_hours",
         "молчуны": "silent_hours",
@@ -967,6 +1057,57 @@ def normalize_setting_name(name: str) -> str:
     return aliases[normalized]
 
 
+def should_use_openrouter_web(
+    mode: str,
+    question: str,
+    ai_moderator: AiModerator,
+) -> bool:
+    if not ai_moderator.base_url or "openrouter.ai" not in ai_moderator.base_url:
+        return False
+    if mode == "openrouter":
+        return True
+    return mode == "auto" and should_use_web(question)
+
+
+def should_use_local_web(mode: str, question: str, ai_moderator: AiModerator) -> bool:
+    if mode == "local":
+        return should_use_web(question)
+    if mode != "auto":
+        return False
+    if ai_moderator.base_url and "openrouter.ai" in ai_moderator.base_url:
+        return False
+    return should_use_web(question)
+
+
+def should_use_web(question: str) -> bool:
+    text = question.casefold()
+    fresh_markers = (
+        "сегодня",
+        "сейчас",
+        "последн",
+        "новост",
+        "курс",
+        "цена",
+        "сколько стоит",
+        "погода",
+        "расписан",
+        "когда выш",
+        "кто сейчас",
+        "какое число",
+        "какая дата",
+        "найди",
+        "поищи",
+        "загугли",
+        "ссылк",
+        "источник",
+        "цитат",
+        "интернет",
+        "в интернете",
+        "2026",
+    )
+    return any(marker in text for marker in fresh_markers) or bool(re.search(r"https?://", text))
+
+
 def settings_help(runtime) -> str:
     return textwrap.dedent(
         f"""
@@ -975,7 +1116,9 @@ def settings_help(runtime) -> str:
         Контекст модерации: `{runtime.moderation_context_limit}` сообщений
         Контекст `/ask`: `{runtime.ask_context_limit}` сообщений
         Модель ИИ: `{runtime.ai_model or 'из .env'}`
+        Модель картинок: `{runtime.image_model or 'из .env'}`
         Интернет для `/ask`: `{'включен' if runtime.ask_web_enabled else 'выключен'}`
+        Режим web-поиска: `{runtime.ask_web_mode}`
         Web-результатов для `/ask`: `{runtime.ask_web_results}`
         Авто-поддержка молчащих: `{runtime.silent_support_hours}` часов
         Анти-душнила: `{'включен' if runtime.anti_bore_enabled else 'выключен'}`
@@ -985,6 +1128,12 @@ def settings_help(runtime) -> str:
         `/settings ask 20` - сколько сообщений видит `/ask`
         `/settings model openai/gpt-5-mini` - пример OpenAI
         `/settings model anthropic/claude-sonnet-latest` - пример Anthropic
+        `/settings image google/gemini-2.5-flash-image` - модель картинок OpenRouter
+        `/settings image black-forest-labs/flux.2-pro` - пример Flux
+        `/settings webmode auto` - умный поиск только когда нужен
+        `/settings webmode openrouter` - всегда дать модели web tool OpenRouter
+        `/settings webmode local` - локальный DuckDuckGo + выдержки страниц
+        `/settings webmode off` - интернет полностью выключен
         `/settings web 1` - включить интернет для `/ask`
         `/settings web 0` - выключить интернет для `/ask`
         `/settings results 4` - сколько web-результатов давать `/ask`

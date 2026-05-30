@@ -21,6 +21,26 @@ def test_store_updates_ai_model(tmp_path) -> None:
     assert settings.ai_model == "anthropic/claude-sonnet-latest"
 
 
+def test_store_updates_web_mode_and_image_model(tmp_path) -> None:
+    store = BotStore(str(tmp_path / "state.json"))
+
+    settings = store.update_text_setting(1, "ask_web_mode", "openrouter")
+    settings = store.update_text_setting(1, "image_model", "black-forest-labs/flux.2-pro")
+
+    assert settings.ask_web_mode == "openrouter"
+    assert settings.ask_web_enabled is True
+    assert settings.image_model == "black-forest-labs/flux.2-pro"
+
+
+def test_store_disables_web_mode_with_numeric_setting(tmp_path) -> None:
+    store = BotStore(str(tmp_path / "state.json"))
+
+    settings = store.update_setting(1, "ask_web", 0)
+
+    assert settings.ask_web_enabled is False
+    assert settings.ask_web_mode == "off"
+
+
 def test_store_tracks_daily_and_all_time_violations(tmp_path) -> None:
     store = BotStore(str(tmp_path / "state.json"))
 

@@ -13,6 +13,32 @@ class SearchResult:
     title: str
     url: str
     snippet: str
+    excerpt: str = ""
+
+
+class ReadableTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "noscript", "svg", "nav", "footer", "header"}:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "noscript", "svg", "nav", "footer", "header"}:
+            self._skip_depth = max(0, self._skip_depth - 1)
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        text = normalize_space(data)
+        if len(text) >= 40:
+            self.parts.append(text)
+
+    def text(self, limit: int = 1800) -> str:
+        return normalize_space(" ".join(self.parts))[:limit]
 
 
 class DuckDuckGoHtmlParser(HTMLParser):
@@ -81,12 +107,62 @@ async def search_web(query: str, limit: int = 4) -> list[SearchResult]:
     return parser.results[:limit]
 
 
+async def search_web_deep(query: str, limit: int = 4, excerpt_chars: int = 1800) -> list[SearchResult]:
+    async with httpx.AsyncClient(
+        timeout=10,
+        follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0 tg-guard-bot/0.1"},
+    ) as client:
+        response = await client.get("https://duckduckgo.com/html/", params={"q": query})
+        response.raise_for_status()
+        parser = DuckDuckGoHtmlParser()
+        parser.feed(response.text)
+        parser.close()
+        results = parser.results[:limit]
+
+        enriched: list[SearchResult] = []
+        for result in results:
+            excerpt = ""
+            if is_fetchable_url(result.url):
+                try:
+                    excerpt = await fetch_page_excerpt(client, result.url, excerpt_chars)
+                except (httpx.HTTPError, UnicodeDecodeError):
+                    excerpt = ""
+            enriched.append(
+                SearchResult(
+                    title=result.title,
+                    url=result.url,
+                    snippet=result.snippet,
+                    excerpt=excerpt,
+                )
+            )
+        return enriched
+
+
+async def fetch_page_excerpt(client: httpx.AsyncClient, url: str, limit: int) -> str:
+    response = await client.get(url)
+    response.raise_for_status()
+    content_type = response.headers.get("content-type", "")
+    if "text/html" not in content_type and "text/plain" not in content_type:
+        return ""
+    parser = ReadableTextParser()
+    parser.feed(response.text[:300_000])
+    parser.close()
+    return parser.text(limit)
+
+
 def format_search_results(results: list[SearchResult]) -> str:
     if not results:
         return ""
     lines: list[str] = []
     for index, result in enumerate(results, start=1):
-        lines.append(f"{index}. {result.title}\nURL: {result.url}\nФрагмент: {result.snippet}")
+        excerpt = result.excerpt or result.snippet
+        lines.append(
+            f"{index}. {result.title}\n"
+            f"URL: {result.url}\n"
+            f"Сниппет: {result.snippet}\n"
+            f"Выдержка со страницы: {excerpt}"
+        )
     return "\n\n".join(lines)
 
 
@@ -100,6 +176,11 @@ def clean_duckduckgo_url(value: str) -> str:
         if target:
             return unquote(target)
     return value
+
+
+def is_fetchable_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def normalize_space(value: str) -> str:

@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     openai_base_url: str | None = Field(None, alias="OPENAI_BASE_URL")
     openrouter_site_url: str | None = Field(None, alias="OPENROUTER_SITE_URL")
     openrouter_app_name: str | None = Field("TG Guard Bot", alias="OPENROUTER_APP_NAME")
+    openrouter_image_model: str = Field(
+        "google/gemini-2.5-flash-image",
+        alias="OPENROUTER_IMAGE_MODEL",
+    )
+    openrouter_image_aspect_ratio: str = Field("1:1", alias="OPENROUTER_IMAGE_ASPECT_RATIO")
+    openrouter_image_size: str = Field("1K", alias="OPENROUTER_IMAGE_SIZE")
     chat_rules_path: str | None = Field("chat_rules.md", alias="CHAT_RULES_PATH")
     data_path: str = Field("data/bot_state.json", alias="DATA_PATH")
 

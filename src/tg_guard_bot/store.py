@@ -12,8 +12,10 @@ class ChatRuntimeSettings:
     moderation_context_limit: int = 10
     ask_context_limit: int = 20
     ask_web_enabled: bool = True
+    ask_web_mode: str = "auto"
     ask_web_results: int = 4
     ai_model: str | None = None
+    image_model: str | None = None
     silent_support_hours: int = 72
     anti_bore_enabled: bool = True
     last_daily_stats_date: str | None = None
@@ -133,6 +135,7 @@ class BotStore:
             settings.ask_context_limit = clamp(value, 3, 50)
         elif name == "ask_web":
             settings.ask_web_enabled = bool(value)
+            settings.ask_web_mode = "auto" if value else "off"
         elif name == "ask_web_results":
             settings.ask_web_results = clamp(value, 1, 8)
         elif name == "silent_hours":
@@ -148,6 +151,14 @@ class BotStore:
         settings = self.settings_for(chat_id)
         if name == "ai_model":
             settings.ai_model = value.strip() or None
+        elif name == "image_model":
+            settings.image_model = value.strip() or None
+        elif name == "ask_web_mode":
+            mode = value.strip().casefold()
+            if mode not in {"auto", "openrouter", "local", "off"}:
+                raise ValueError(f"Unknown web mode: {value}")
+            settings.ask_web_mode = mode
+            settings.ask_web_enabled = mode != "off"
         else:
             raise ValueError(f"Unknown setting: {name}")
         self.save()

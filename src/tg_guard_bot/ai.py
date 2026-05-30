@@ -34,9 +34,10 @@ SYSTEM_PROMPT = """
     confidence ниже 0.8, а не delete.
 12. Предыдущие плохие сообщения в контексте не делают текущее сообщение плохим
     автоматически. Оценивай именно последнее сообщение.
-13. Никогда не предлагай удалить, выгнать или забанить пользователя из чата. Санкции:
-    удалить сообщение, предупредить, временно ограничить отправку сообщений, отправить
-    админам на проверку.
+13. Никогда не предлагай выгнать или забанить пользователя из чата. Основная санкция:
+    публичный братский стоп-кран/предупреждение и отправка админам на проверку.
+    Вердикт delete используй только как метку очень уверенного нарушения, но бот сам
+    сообщение автоматически не удаляет.
 14. Любые ссылки в чате разрешены. Не считай сообщение нарушением только потому, что
     в нем есть URL, инвайт, t.me, короткая ссылка или рекламно выглядящий домен.
 
@@ -108,10 +109,27 @@ class AiModerator:
         web_context: str = "",
         current_time: str = "",
         model: str | None = None,
+        use_openrouter_web: bool = False,
+        web_results: int = 4,
     ) -> str:
+        extra_body = None
+        if use_openrouter_web:
+            extra_body = {
+                "tools": [
+                    {
+                        "type": "openrouter:web_search",
+                        "parameters": {
+                            "engine": "auto",
+                            "max_results": max(1, min(8, web_results)),
+                            "max_total_results": max(1, min(12, web_results * 2)),
+                        },
+                    }
+                ]
+            }
         response = await self.client.chat.completions.create(
             model=model or self.model,
             temperature=0.3,
+            extra_body=extra_body,
             messages=[
                 {
                     "role": "system",
