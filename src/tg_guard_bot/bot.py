@@ -963,6 +963,7 @@ async def maybe_count_support(message: Message, store: BotStore, text: str) -> N
             random.choice(SUPPORT_MESSAGES).format(
                 supporter=md_escape(message.from_user.full_name),
                 target=md_escape(target_name),
+                action=support_kind(text),
                 count=stats.all_supports,
             ),
             parse_mode=ParseMode.MARKDOWN,
@@ -993,6 +994,15 @@ def support_target_name(user_id: int, full_name: str) -> str | None:
 def looks_supportive(text: str) -> bool:
     normalized = text.casefold()
     return any(phrase in normalized for phrase in SUPPORT_KEYWORDS)
+
+
+def support_kind(text: str) -> str:
+    normalized = text.casefold()
+    if any(phrase in normalized for phrase in LUCK_KEYWORDS):
+        return "пожелал удачи"
+    if any(phrase in normalized for phrase in COMPLIMENT_KEYWORDS):
+        return "зарядил комплиментом"
+    return "поддержал"
 
 
 def ass_poll_keyboard() -> InlineKeyboardMarkup:
@@ -1203,9 +1213,9 @@ def md_escape(value: str) -> str:
 
 
 SUPPORT_MESSAGES = [
-    "*{supporter} поддержал {target}.*\nРеспект в копилку: `{count}`. Братский каркас укреплен.",
-    "*{supporter} кинул братский подпор для {target}.*\nСчетчик поддержки: `{count}`. Так и строится нормальная психика.",
-    "*{supporter} сказал делом: {target}, ты не один.*\nПоддержек всего: `{count}`. Очко стало на миллиметр свободнее.",
+    "*{supporter} {action} {target}.*\nРеспект в копилку: `{count}`. Братский каркас укреплен.",
+    "*{supporter} {action} {target}.*\nСчетчик поддержки: `{count}`. Так и строится нормальная психика.",
+    "*{supporter} {action} {target}.*\nПоддержек всего: `{count}`. Очко стало на миллиметр свободнее.",
 ]
 
 
@@ -1233,12 +1243,45 @@ SUPPORT_TARGET_ALIASES = {
 }
 
 
-SUPPORT_KEYWORDS = [
+COMPLIMENT_KEYWORDS = [
     "красавчик",
     "молодец",
     "лучший",
+    "сильный",
+    "крутой",
+    "хорош",
+    "хороший",
+    "умница",
+    "красава",
+    "легенда",
+    "мощный",
+    "горжусь",
+    "уважаю",
     "уважуха",
     "респект",
+]
+
+
+LUCK_KEYWORDS = [
+    "удачи",
+    "успехов",
+    "ни пуха",
+    "пусть получится",
+    "пусть все получится",
+    "пусть всё получится",
+    "хорошего дня",
+    "доброго дня",
+    "держу кулаки",
+    "верю в тебя",
+    "верим в тебя",
+    "давай брат",
+    "давай братик",
+]
+
+
+SUPPORT_KEYWORDS = [
+    *COMPLIMENT_KEYWORDS,
+    *LUCK_KEYWORDS,
     "все будет хорошо",
     "всё будет хорошо",
     "все получится",
@@ -1249,8 +1292,6 @@ SUPPORT_KEYWORDS = [
     "ты справишься",
     "обнял",
     "обнимаю",
-    "уважаю",
-    "горжусь",
     "не сдавайся",
     "нормально все будет",
     "нормально всё будет",
