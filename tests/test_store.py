@@ -21,3 +21,13 @@ def test_store_tracks_daily_and_all_time_violations(tmp_path) -> None:
     assert stats.user_name == "Rodion"
     assert stats.all_violations == 1
     assert sum(stats.daily_violations.values()) == 1
+
+
+def test_store_rolls_back_violation(tmp_path) -> None:
+    store = BotStore(str(tmp_path / "state.json"))
+
+    store.add_violation(1, 2, "Rodion")
+    stats = store.rollback_violation(1, 2, "Rodion")
+
+    assert stats.all_violations == 0
+    assert sum(stats.daily_violations.values()) == 0

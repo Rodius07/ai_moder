@@ -132,6 +132,20 @@ class BotStore:
         self.save()
         return stats
 
+    def rollback_violation(self, chat_id: int, user_id: int, user_name: str | None = None) -> UserStats:
+        stats = self.user_for(chat_id, user_id)
+        if user_name:
+            stats.user_name = user_name
+        stats.all_violations = max(0, stats.all_violations - 1)
+        today = date.today().isoformat()
+        current_daily = stats.daily_violations.get(today, 0)
+        if current_daily <= 1:
+            stats.daily_violations.pop(today, None)
+        else:
+            stats.daily_violations[today] = current_daily - 1
+        self.save()
+        return stats
+
     def add_support(self, chat_id: int, user_id: int, user_name: str) -> UserStats:
         stats = self.user_for(chat_id, user_id)
         stats.user_name = user_name

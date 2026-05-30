@@ -123,6 +123,35 @@ class AiModerator:
         )
         return (response.choices[0].message.content or "").strip()
 
+    async def appeal(self, message_text: str, context: str, author: str = "") -> str:
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.2,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты финальный арбитр апелляции в братском Telegram-чате. "
+                        "Смотри на спорное сообщение и 30 сообщений контекста. "
+                        "Если сообщение было нормальным или это очевидный дружеский рофл, "
+                        "начни ответ с 'Оправдано.' и коротко извинись перед участником. "
+                        "Если нарушение было, начни с 'Вердикт оставлен.' и подробно, но без "
+                        "душноты объясни, что именно было некорректно и как переформулировать. "
+                        "Не предлагай банить или удалять людей из чата."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Автор спорного сообщения: {author}\n\n"
+                        f"Контекст 30 сообщений:\n{context[:7000]}\n\n"
+                        f"Спорное сообщение:\n{message_text[:3000]}"
+                    ),
+                },
+            ],
+        )
+        return (response.choices[0].message.content or "").strip()
+
 
 def parse_moderation_json(raw: str) -> ModerationResult:
     try:

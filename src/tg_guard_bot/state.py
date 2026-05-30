@@ -12,6 +12,14 @@ class WarningStore:
         self._warnings[key] += 1
         return self._warnings[key]
 
+    def rollback(self, chat_id: int, user_id: int) -> int:
+        key = (chat_id, user_id)
+        if self._warnings[key] <= 1:
+            self._warnings.pop(key, None)
+            return 0
+        self._warnings[key] -= 1
+        return self._warnings[key]
+
     def get(self, chat_id: int, user_id: int) -> int:
         return self._warnings[(chat_id, user_id)]
 

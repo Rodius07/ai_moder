@@ -89,6 +89,7 @@ async def on_startup(bot: Bot, store: BotStore, settings: Settings) -> None:
             BotCommand(command="stats", description="статистика нарушений и разжатость"),
             BotCommand(command="support", description="поддержать брата ответом на сообщение"),
             BotCommand(command="ask", description="задать вопрос ИИ с контекстом чата"),
+            BotCommand(command="appeal", description="апелляция по спорному сообщению"),
             BotCommand(command="warns", description="мои предупреждения"),
             BotCommand(command="resetstats", description="админ: обнулить счетчики"),
         ]
@@ -116,7 +117,7 @@ async def start(message: Message) -> None:
     await message.answer(
         "*Я на посту братства.*\n"
         "Проверяю чат, слушаю голосовые, помню контекст и иногда мягко хлопаю по плечу.\n\n"
-        "Команды: /settings, /stats, /rules, /ask",
+        "Команды: /settings, /stats, /rules, /ask, /appeal",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -204,6 +205,45 @@ async def ask(
         return
     await thinking.edit_text(answer[:3900])
     record_ask_exchange(message, bot, store, question, answer)
+
+
+@router.message(Command("appeal"))
+async def appeal(
+    message: Message,
+    ai_moderator: AiModerator | None,
+    store: BotStore,
+) -> None:
+    if not ai_moderator:
+        await message.answer("Апелляции через ИИ пока выключены: не задан OPENAI_API_KEY.")
+        return
+    if not message.reply_to_message:
+        await message.answer(
+            "Ответь `/appeal` на спорное сообщение, и я пересмотрю его с 30 сообщениями контекста.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    disputed = message.reply_to_message
+    text = disputed.text or disputed.caption or ""
+    if not text:
+        await message.answer("Не вижу текста в спорном сообщении. Тут мне нечего пересматривать.")
+        return
+
+    thinking = await message.answer("Пересматриваю по-братски...")
+    try:
+        context = format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30)))
+        author = (
+            f"{disputed.from_user.full_name} ({disputed.from_user.id})"
+            if disputed.from_user
+            else "unknown"
+        )
+        answer = await ai_moderator.appeal(text, context, author)
+    except Exception:
+        logger.exception("appeal failed chat=%s message=%s", message.chat.id, disputed.message_id)
+        await thinking.edit_text("Не получилось пересмотреть. ИИ сейчас присел на корточки.")
+        return
+
+    await thinking.edit_text(answer[:3900])
 
 
 @router.message(Command("settings", "sintings", "sitings"))
@@ -491,12 +531,23 @@ async def handle_violation(
     if result.verdict is Verdict.MUTE or warning_count >= settings.max_warnings_before_mute:
         await try_mute(message, settings.mute_minutes)
 
+    warning_message = None
     if settings.warn_in_chat:
-        await safe_answer(message, creative_violation_note(result, warning_count, stats))
+        warning_message = await safe_answer(
+            message,
+            creative_violation_note(result, warning_count, stats),
+        )
 
     if settings.admin_chat_id:
         try:
-            await notify_admins(message, bot, settings.admin_chat_id, result, warning_count)
+            await notify_admins(
+                message,
+                bot,
+                settings.admin_chat_id,
+                result,
+                warning_count,
+                warning_message.message_id if warning_message else 0,
+            )
         except (TelegramBadRequest, TelegramForbiddenError):
             logger.warning("failed to notify admin chat id=%s", settings.admin_chat_id)
 
@@ -507,6 +558,7 @@ async def notify_admins(
     admin_chat_id: int,
     result: ModerationResult,
     warning_count: int,
+    warning_message_id: int,
 ) -> None:
     user = message.from_user
     user_label = md_escape(user.full_name) if user else "unknown"
@@ -526,7 +578,10 @@ async def notify_admins(
             [
                 InlineKeyboardButton(
                     text="ОК",
-                    callback_data=f"ok:{message.chat.id}:{message.message_id}",
+                    callback_data=(
+                        f"ok:{message.chat.id}:{message.message_id}:"
+                        f"{user.id if user else 0}:{warning_message_id}"
+                    ),
                 )
             ],
         ]
@@ -573,8 +628,37 @@ async def admin_mute(callback: CallbackQuery, bot: Bot) -> None:
 
 
 @router.callback_query(F.data.startswith("ok:"))
-async def admin_ok(callback: CallbackQuery) -> None:
-    await callback.answer("Принято")
+async def admin_ok(callback: CallbackQuery, bot: Bot, store: BotStore, warnings: WarningStore) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) < 5:
+        await callback.answer("Старое уведомление: не хватает данных для отката", show_alert=True)
+        return
+
+    _, chat_id_text, _message_id_text, user_id_text, warning_message_id_text = parts[:5]
+    chat_id = int(chat_id_text)
+    user_id = int(user_id_text)
+    warning_message_id = int(warning_message_id_text)
+    user_name = await user_display_name(bot, chat_id, user_id)
+
+    warnings.rollback(chat_id, user_id)
+    store.rollback_violation(chat_id, user_id, user_name)
+
+    if warning_message_id:
+        with suppress(TelegramBadRequest, TelegramForbiddenError):
+            await bot.delete_message(chat_id, warning_message_id)
+
+    with suppress(TelegramBadRequest, TelegramForbiddenError):
+        await bot.send_message(
+            chat_id,
+            f"*{md_escape(user_name)}, апелляция принята.*\n"
+            "Бот перегнул палку, счетчик откатил. Братство приносит извинения и выдыхает.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    if callback.message:
+        with suppress(TelegramBadRequest, TelegramForbiddenError):
+            await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Откатил и извинился")
 
 
 @router.callback_query(F.data.startswith("ass:"))
@@ -608,11 +692,20 @@ async def try_mute(message: Message, minutes: int) -> None:
         pass
 
 
-async def safe_answer(message: Message, text: str) -> None:
+async def safe_answer(message: Message, text: str) -> Message | None:
     try:
-        await message.answer(text[:3900], parse_mode=ParseMode.MARKDOWN)
+        return await message.answer(text[:3900], parse_mode=ParseMode.MARKDOWN)
     except (TelegramBadRequest, TelegramForbiddenError):
-        pass
+        return None
+
+
+async def user_display_name(bot: Bot, chat_id: int, user_id: int) -> str:
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return str(user_id)
+    user = member.user
+    return user.full_name or user.username or str(user_id)
 
 
 def normalize_setting_name(name: str) -> str:
