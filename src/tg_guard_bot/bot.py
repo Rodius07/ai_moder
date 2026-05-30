@@ -614,7 +614,7 @@ async def process_group_message(
             ai_result.confidence,
             ai_result.reasons,
         )
-        ai_result = soften_uncertain_ai_delete(ai_result)
+        ai_result = filter_unprotected_insult(message, text, soften_uncertain_ai_delete(ai_result))
         if ai_result.is_violation and ai_result.confidence >= 0.65:
             result = ai_result
         elif local_result.is_violation and local_result.confidence >= 0.9:
@@ -666,6 +666,35 @@ def soften_uncertain_ai_delete(result: ModerationResult) -> ModerationResult:
             public_note=result.public_note,
         )
     return result
+
+
+def filter_unprotected_insult(
+    message: Message,
+    text: str,
+    result: ModerationResult,
+) -> ModerationResult:
+    if not result.is_violation:
+        return result
+    joined_reasons = " ".join(result.reasons).casefold()
+    insult_markers = ("оскорб", "унижен", "травл", "агресс", "буллинг", "мат")
+    hard_markers = ("угроз", "шантаж", "давлен", "докс", "слив", "самоповреж", "незакон")
+    if not any(marker in joined_reasons for marker in insult_markers):
+        return result
+    if any(marker in joined_reasons for marker in hard_markers):
+        return result
+    if mentions_protected_brother(message, text):
+        return result
+    return ModerationResult.allow()
+
+
+def mentions_protected_brother(message: Message, text: str) -> bool:
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        if target.id in SUPPORT_TARGET_USER_IDS:
+            return True
+
+    tokens = set(re.findall(r"[\włё]+", text.casefold()))
+    return any(token in SUPPORT_TARGET_ALIASES for token in tokens)
 
 
 def is_forwarded_message(message: Message) -> bool:
