@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     admin_chat_id: int | None = Field(None, alias="ADMIN_CHAT_ID")
 
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
-    openai_model: str = Field("gpt-4.1-mini", alias="OPENAI_MODEL")
+    openai_model: str = Field("gpt-5-mini", alias="OPENAI_MODEL")
     openai_base_url: str | None = Field(None, alias="OPENAI_BASE_URL")
     openrouter_site_url: str | None = Field(None, alias="OPENROUTER_SITE_URL")
     openrouter_app_name: str | None = Field("TG Guard Bot", alias="OPENROUTER_APP_NAME")

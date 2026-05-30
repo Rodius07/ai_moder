@@ -45,7 +45,7 @@ cp .env.example .env
 ```env
 OPENAI_API_KEY=ваш_openrouter_key
 OPENAI_BASE_URL=https://openrouter.ai/api/v1
-OPENAI_MODEL=openai/gpt-4.1-mini
+OPENAI_MODEL=openai/gpt-5-mini
 OPENROUTER_APP_NAME=TG Guard Bot
 ```
 
