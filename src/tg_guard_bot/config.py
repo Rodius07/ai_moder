@@ -15,6 +15,10 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-5-mini", alias="OPENAI_MODEL")
+    openai_moderation_model: str = Field(
+        "google/gemini-2.0-flash-lite-001",
+        alias="OPENAI_MODERATION_MODEL",
+    )
     openai_base_url: str | None = Field(None, alias="OPENAI_BASE_URL")
     openrouter_site_url: str | None = Field(None, alias="OPENROUTER_SITE_URL")
     openrouter_app_name: str | None = Field("TG Guard Bot", alias="OPENROUTER_APP_NAME")

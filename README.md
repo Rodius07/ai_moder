@@ -48,6 +48,7 @@ cp .env.example .env
 OPENAI_API_KEY=ваш_openrouter_key
 OPENAI_BASE_URL=https://openrouter.ai/api/v1
 OPENAI_MODEL=openai/gpt-5-mini
+OPENAI_MODERATION_MODEL=google/gemini-2.0-flash-lite-001
 OPENROUTER_APP_NAME=TG Guard Bot
 OPENROUTER_IMAGE_MODEL=google/gemini-2.5-flash-image
 ```
@@ -88,6 +89,8 @@ python -m tg_guard_bot.main
 - `/settings webmode openrouter` - всегда давать модели OpenRouter web search tool;
 - `/settings webmode local` - DuckDuckGo + выдержки страниц;
 - `/settings webmode off` - выключить интернет для `/ask`;
+- `/settings modmodel google/gemini-2.0-flash-lite-001` - дешевая модель для проверки каждого сообщения;
+- `/settings model openai/gpt-5-mini` - мощная общая модель для `/ask`, `/report`, `/appeal`;
 - `/settings image google/gemini-2.5-flash-image` - модель картинок;
 - `/settings image black-forest-labs/flux.2-pro` - пример альтернативной модели.
 

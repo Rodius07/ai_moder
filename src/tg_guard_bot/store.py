@@ -15,6 +15,7 @@ class ChatRuntimeSettings:
     ask_web_mode: str = "auto"
     ask_web_results: int = 4
     ai_model: str | None = None
+    moderation_model: str | None = None
     image_model: str | None = None
     silent_support_hours: int = 72
     anti_bore_enabled: bool = True
@@ -151,6 +152,8 @@ class BotStore:
         settings = self.settings_for(chat_id)
         if name == "ai_model":
             settings.ai_model = value.strip() or None
+        elif name == "moderation_model":
+            settings.moderation_model = value.strip() or None
         elif name == "image_model":
             settings.image_model = value.strip() or None
         elif name == "ask_web_mode":

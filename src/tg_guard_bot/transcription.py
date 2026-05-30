@@ -90,7 +90,7 @@ async def transcribe_message_media(
 
         transcript = await transcriber.transcribe(destination)
         if not transcript:
-            return f"[{media.kind}: речь не распознана]"
+            return None
         return f"[{media.kind}, распознано локально]: {transcript}"
 
 

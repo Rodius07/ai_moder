@@ -152,7 +152,8 @@ async def rules(message: Message, settings: Settings, store: BotStore) -> None:
         f"- запрещенные домены: `{domains}`\n"
         f"- контекст модерации: `{runtime.moderation_context_limit}` сообщений\n"
         f"- контекст /ask: `{runtime.ask_context_limit}` сообщений\n"
-        f"- модель ИИ: `{runtime.ai_model or settings.openai_model}`\n"
+        f"- модель модерации: `{moderation_model_for(runtime, settings)}`\n"
+        f"- модель /ask, /report, /appeal: `{creative_model_for(runtime, settings)}`\n"
         f"- модель картинок: `{runtime.image_model or settings.openrouter_image_model}`\n"
         f"- web-поиск /ask: `{runtime.ask_web_mode}`\n"
         f"- авто-поддержка молчащих: `{runtime.silent_support_hours}` часов\n"
@@ -176,6 +177,7 @@ async def ask(
     message: Message,
     command: CommandObject,
     bot: Bot,
+    settings: Settings,
     ai_moderator: AiModerator | None,
     history: MessageHistory,
     store: BotStore,
@@ -234,7 +236,7 @@ async def ask(
             asker,
             web_context,
             current_time,
-            runtime.ai_model,
+            creative_model_for(runtime, settings),
             use_openrouter_web,
             runtime.ask_web_results,
         )
@@ -332,7 +334,7 @@ async def appeal(
         context = format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30)))
         author = f"{case.user_name} ({case.user_id})"
         runtime = store.settings_for(message.chat.id)
-        answer = await ai_moderator.appeal(text, context, author, runtime.ai_model)
+        answer = await ai_moderator.appeal(text, context, author, creative_model_for(runtime, settings))
     except Exception:
         logger.exception("appeal failed chat=%s message=%s", message.chat.id, disputed.message_id)
         await thinking.edit_text("Не получилось пересмотреть. ИИ сейчас присел на корточки.")
@@ -382,11 +384,16 @@ async def report(
             else "unknown"
         )
         runtime = store.settings_for(message.chat.id)
-        explanation = await ai_moderator.report(text, context, author, runtime.ai_model)
+        explanation = await ai_moderator.report(
+            text,
+            context,
+            author,
+            creative_model_for(runtime, settings),
+        )
         moderation_result = await ai_moderator.moderate(
             text,
             format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30))),
-            runtime.ai_model,
+            moderation_model_for(runtime, settings),
         )
         moderation_result = soften_uncertain_ai_delete(moderation_result)
     except Exception:
@@ -442,7 +449,12 @@ async def settings_menu(message: Message, command: CommandObject, store: BotStor
     if len(args) >= 2:
         try:
             setting_name = normalize_setting_name(args[0])
-            if setting_name in {"ai_model", "image_model", "ask_web_mode"}:
+            if setting_name in {
+                "ai_model",
+                "moderation_model",
+                "image_model",
+                "ask_web_mode",
+            }:
                 runtime = store.update_text_setting(
                     message.chat.id,
                     setting_name,
@@ -672,7 +684,7 @@ async def process_group_message(
                         persisted_context_messages[-runtime.moderation_context_limit :]
                     )
                 ),
-                runtime.ai_model,
+                moderation_model_for(runtime, settings),
             )
         except Exception:
             ai_result = ModerationResult(
@@ -1035,6 +1047,13 @@ def normalize_setting_name(name: str) -> str:
         "model": "ai_model",
         "ai_model": "ai_model",
         "модель": "ai_model",
+        "creative_model": "ai_model",
+        "bigmodel": "ai_model",
+        "modmodel": "moderation_model",
+        "mod_model": "moderation_model",
+        "moderation_model": "moderation_model",
+        "cheapmodel": "moderation_model",
+        "smallmodel": "moderation_model",
         "image": "image_model",
         "img": "image_model",
         "image_model": "image_model",
@@ -1055,6 +1074,14 @@ def normalize_setting_name(name: str) -> str:
     if normalized not in aliases:
         raise ValueError(name)
     return aliases[normalized]
+
+
+def creative_model_for(runtime, settings: Settings) -> str:
+    return runtime.ai_model or settings.openai_model
+
+
+def moderation_model_for(runtime, settings: Settings) -> str:
+    return runtime.moderation_model or settings.openai_moderation_model or settings.openai_model
 
 
 def should_use_openrouter_web(
@@ -1115,7 +1142,8 @@ def settings_help(runtime) -> str:
 
         Контекст модерации: `{runtime.moderation_context_limit}` сообщений
         Контекст `/ask`: `{runtime.ask_context_limit}` сообщений
-        Модель ИИ: `{runtime.ai_model or 'из .env'}`
+        Модель модерации: `{runtime.moderation_model or 'из .env'}`
+        Модель `/ask`, `/report`, `/appeal`: `{runtime.ai_model or 'из .env'}`
         Модель картинок: `{runtime.image_model or 'из .env'}`
         Интернет для `/ask`: `{'включен' if runtime.ask_web_enabled else 'выключен'}`
         Режим web-поиска: `{runtime.ask_web_mode}`
@@ -1126,8 +1154,9 @@ def settings_help(runtime) -> str:
         *Команды настройки*
         `/settings mod 15` - сколько сообщений давать модерации
         `/settings ask 20` - сколько сообщений видит `/ask`
-        `/settings model openai/gpt-5-mini` - пример OpenAI
-        `/settings model anthropic/claude-sonnet-latest` - пример Anthropic
+        `/settings modmodel google/gemini-2.0-flash-lite-001` - дешевая проверка каждого сообщения
+        `/settings model openai/gpt-5-mini` - мощная модель для `/ask`, `/report`, `/appeal`
+        `/settings model anthropic/claude-sonnet-latest` - пример Anthropic для умных команд
         `/settings image google/gemini-2.5-flash-image` - модель картинок OpenRouter
         `/settings image black-forest-labs/flux.2-pro` - пример Flux
         `/settings webmode auto` - умный поиск только когда нужен

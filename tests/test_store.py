@@ -21,6 +21,14 @@ def test_store_updates_ai_model(tmp_path) -> None:
     assert settings.ai_model == "anthropic/claude-sonnet-latest"
 
 
+def test_store_updates_moderation_model(tmp_path) -> None:
+    store = BotStore(str(tmp_path / "state.json"))
+
+    settings = store.update_text_setting(1, "moderation_model", "google/gemini-2.0-flash-lite-001")
+
+    assert settings.moderation_model == "google/gemini-2.0-flash-lite-001"
+
+
 def test_store_updates_web_mode_and_image_model(tmp_path) -> None:
     store = BotStore(str(tmp_path / "state.json"))
 
