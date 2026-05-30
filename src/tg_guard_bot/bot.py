@@ -509,6 +509,7 @@ async def process_group_message(
             ai_result.confidence,
             ai_result.reasons,
         )
+        ai_result = soften_uncertain_ai_delete(ai_result)
         if ai_result.is_violation and ai_result.confidence >= 0.65:
             result = ai_result
         elif local_result.is_violation and local_result.confidence >= 0.9:
@@ -534,6 +535,32 @@ async def process_group_message(
     finally:
         history.discard_last(message.chat.id, current_history_message)
         store.discard_last_message(message.chat.id, message.from_user.id, text)
+
+
+def soften_uncertain_ai_delete(result: ModerationResult) -> ModerationResult:
+    if result.verdict is not Verdict.DELETE:
+        return result
+    joined_reasons = " ".join(result.reasons).casefold()
+    uncertain_markers = (
+        "без явного",
+        "неяс",
+        "непонят",
+        "возможн",
+        "коротк",
+        "без признаков",
+        "без контекста",
+    )
+    if result.confidence < 0.95 or any(marker in joined_reasons for marker in uncertain_markers):
+        return ModerationResult(
+            verdict=Verdict.REVIEW,
+            confidence=min(result.confidence, 0.74),
+            reasons=[
+                *result.reasons,
+                "смягчено: не хватает уверенности для удаления без явного адресата/контекста",
+            ],
+            public_note=result.public_note,
+        )
+    return result
 
 
 async def handle_violation(
