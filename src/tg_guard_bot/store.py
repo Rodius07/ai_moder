@@ -20,6 +20,8 @@ class ChatRuntimeSettings:
     video_model: str | None = None
     silent_support_hours: int = 72
     anti_bore_enabled: bool = True
+    creative_interjections_enabled: bool = True
+    last_creative_interjection_at: str | None = None
     last_daily_stats_date: str | None = None
     last_morning_message_date: str | None = None
     last_evening_message_date: str | None = None
@@ -144,6 +146,8 @@ class BotStore:
             settings.silent_support_hours = clamp(value, 1, 24 * 30)
         elif name == "anti_bore":
             settings.anti_bore_enabled = bool(value)
+        elif name == "creative_interjections":
+            settings.creative_interjections_enabled = bool(value)
         else:
             raise ValueError(f"Unknown setting: {name}")
         self.save()
@@ -258,6 +262,11 @@ class BotStore:
     def mark_anti_bore_sent(self, chat_id: int) -> None:
         settings = self.settings_for(chat_id)
         settings.last_anti_bore_at = now_iso()
+        self.save()
+
+    def mark_creative_interjection_sent(self, chat_id: int) -> None:
+        settings = self.settings_for(chat_id)
+        settings.last_creative_interjection_at = now_iso()
         self.save()
 
     def mark_weekly_digest_sent(self, chat_id: int, week_key: str) -> None:

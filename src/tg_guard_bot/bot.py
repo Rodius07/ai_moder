@@ -13,6 +13,8 @@ from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
+
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -132,7 +134,7 @@ async def on_startup(bot: Bot, store: BotStore, settings: Settings) -> None:
         ]
     )
     create_task(silent_support_loop(bot, store, settings))
-    create_task(daily_schedule_loop(bot, store))
+    create_task(daily_schedule_loop(bot, store, settings))
 
 
 def load_chat_rules(path: str | None) -> str:
@@ -177,6 +179,7 @@ async def rules(message: Message, settings: Settings, store: BotStore) -> None:
         f"- модель картинок: `{runtime.image_model or settings.openrouter_image_model}`\n"
         f"- модель видео: `{runtime.video_model or settings.openrouter_video_model}`\n"
         f"- web-поиск /ask: `{runtime.ask_web_mode}`\n"
+        f"- влезания мощной модели: `{'включены' if runtime.creative_interjections_enabled else 'выключены'}`\n"
         f"- авто-поддержка молчащих: `{runtime.silent_support_hours}` часов\n"
         f"- речь в аудио/видео: `{'включена' if settings.enable_local_transcription else 'выключена'}`\n"
         f"- флуд: больше {settings.flood_max_messages} сообщений за "
@@ -372,23 +375,54 @@ async def video(
 
 @router.message(Command("donate", "donat"))
 async def donate(message: Message, settings: Settings) -> None:
+    balance = await openrouter_balance(settings)
+    await message.answer(render_donation_message(settings, balance), parse_mode=ParseMode.MARKDOWN)
+
+
+def render_donation_message(settings: Settings, balance: float | None = None) -> str:
     lines = [
         "*Сбор на жизнь бота*",
         "",
         "Если бот хоть раз спас братство от бетонного напряжения, можно докинуть топлива:",
         "",
     ]
+    if balance is not None:
+        lines.extend([f"*Баланс OpenRouter:* `${balance:.2f}`", ""])
     if settings.donation_ton_address:
         lines.append(f"*TON:* `{settings.donation_ton_address}`")
     if settings.donation_usdt_address:
-        lines.append(f"*USDT ({md_escape(settings.donation_usdt_network)}):* `{settings.donation_usdt_address}`")
+        lines.append(
+            f"*USDT ({md_escape(settings.donation_usdt_network)}):* `{settings.donation_usdt_address}`"
+        )
     if settings.donation_rub_details:
         lines.append(f"*Рубли:* `{settings.donation_rub_details}`")
-    if len(lines) == 4:
-        lines.append("Реквизиты пока не заданы в `.env`: `DONATION_TON_ADDRESS`, `DONATION_USDT_ADDRESS`, `DONATION_RUB_DETAILS`.")
+    if not any((settings.donation_ton_address, settings.donation_usdt_address, settings.donation_rub_details)):
+        lines.append(
+            "Реквизиты пока не заданы в `.env`: `DONATION_TON_ADDRESS`, "
+            "`DONATION_USDT_ADDRESS`, `DONATION_RUB_DETAILS`."
+        )
     lines.append("")
     lines.append("Донат добровольный. Разжатость не продается, но сервер сам себя не оплатит.")
-    await message.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    return "\n".join(lines)
+
+
+async def openrouter_balance(settings: Settings) -> float | None:
+    if not settings.openai_api_key or not settings.openai_base_url:
+        return None
+    if "openrouter.ai" not in settings.openai_base_url:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(
+                "https://openrouter.ai/api/v1/credits",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            )
+            response.raise_for_status()
+        data = response.json().get("data", {})
+        return float(data.get("total_credits", 0)) - float(data.get("total_usage", 0))
+    except Exception:
+        logger.exception("failed to fetch OpenRouter balance")
+        return None
 
 
 @router.message(Command("appeal", "apell"))
@@ -763,6 +797,16 @@ async def process_group_message(
         text,
         limit=100,
     )
+    if not is_edit and ai_moderator:
+        if await maybe_handle_bot_addressed_message(
+            message,
+            bot,
+            settings,
+            ai_moderator,
+            store,
+            text,
+        ):
+            return
     if not is_edit:
         await maybe_send_anti_bore(message, persisted_context_messages, store)
 
@@ -780,15 +824,30 @@ async def process_group_message(
 
     if ai_moderator:
         try:
+            moderation_context = format_context(
+                stored_to_chat_messages(
+                    persisted_context_messages[-runtime.moderation_context_limit :]
+                )
+            )
             ai_result = await ai_moderator.moderate(
                 text,
-                format_context(
-                    stored_to_chat_messages(
-                        persisted_context_messages[-runtime.moderation_context_limit :]
-                    )
-                ),
+                moderation_context,
                 moderation_model_for(runtime, settings),
             )
+            ai_result = filter_unprotected_insult(message, text, soften_uncertain_ai_delete(ai_result))
+            if ai_result.is_violation and ai_result.confidence >= 0.65:
+                logger.info(
+                    "small model escalated to creative model chat=%s user=%s verdict=%s confidence=%.2f",
+                    message.chat.id,
+                    message.from_user.id,
+                    ai_result.verdict.value,
+                    ai_result.confidence,
+                )
+                ai_result = await ai_moderator.moderate(
+                    text,
+                    moderation_context,
+                    creative_model_for(runtime, settings),
+                )
         except Exception:
             ai_result = ModerationResult(
                 verdict=Verdict.REVIEW,
@@ -823,6 +882,14 @@ async def process_group_message(
     )
 
     if result.verdict is Verdict.ALLOW:
+        if not is_edit and ai_moderator:
+            await maybe_send_creative_interjection(
+                message,
+                settings,
+                ai_moderator,
+                store,
+                persisted_context_messages,
+            )
         return
 
     try:
@@ -1117,6 +1184,15 @@ async def safe_answer(message: Message, text: str) -> Message | None:
         return None
 
 
+async def safe_reply_markdown(message: Message, text: str) -> Message | None:
+    try:
+        return await message.reply(text[:3900], parse_mode=ParseMode.MARKDOWN)
+    except TelegramBadRequest:
+        return await message.reply(text[:3900])
+    except TelegramForbiddenError:
+        return None
+
+
 async def edit_text_markdown(message: Message, text: str) -> None:
     try:
         await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
@@ -1176,6 +1252,11 @@ def normalize_setting_name(name: str) -> str:
         "anti_bore": "anti_bore",
         "душнила": "anti_bore",
         "антидушнила": "anti_bore",
+        "interject": "creative_interjections",
+        "interjections": "creative_interjections",
+        "creative": "creative_interjections",
+        "влезания": "creative_interjections",
+        "подшучивания": "creative_interjections",
     }
     normalized = name.strip().casefold().replace("-", "_")
     if normalized not in aliases:
@@ -1258,6 +1339,7 @@ def settings_help(runtime) -> str:
         Web-результатов для `/ask`: `{runtime.ask_web_results}`
         Авто-поддержка молчащих: `{runtime.silent_support_hours}` часов
         Анти-душнила: `{'включен' if runtime.anti_bore_enabled else 'выключен'}`
+        Влезания мощной модели: `{'включены' if runtime.creative_interjections_enabled else 'выключены'}`
 
         *Команды настройки*
         `/settings mod 15` - сколько сообщений давать модерации
@@ -1278,6 +1360,8 @@ def settings_help(runtime) -> str:
         `/settings silent 72` - через сколько часов молчания чекать брата
         `/settings antibore 0` - выключить анти-душнилу
         `/settings antibore 1` - включить анти-душнилу
+        `/settings interject 0` - выключить влезания мощной модели
+        `/settings interject 1` - включить влезания мощной модели
 
         Опечатки `/sintings` и `/sitings` тоже понимаю. Я не гордый.
         """
@@ -1495,6 +1579,185 @@ async def maybe_send_anti_bore(
     )
 
 
+async def maybe_handle_bot_addressed_message(
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    ai_moderator: AiModerator,
+    store: BotStore,
+    text: str,
+) -> bool:
+    if not is_addressed_to_bot(message, bot, text):
+        return False
+    if text.startswith("/"):
+        return False
+
+    runtime = store.settings_for(message.chat.id)
+    settings_reply = apply_natural_setting_request(message.chat.id, text, store)
+    if settings_reply:
+        await safe_reply_markdown(message, settings_reply)
+        return True
+
+    if not looks_like_bot_question(message, bot, text):
+        return False
+
+    context = format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, runtime.ask_context_limit)))
+    asker = f"{message.from_user.full_name} ({message.from_user.id})" if message.from_user else ""
+    current_time = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S MSK, %A")
+    try:
+        answer = await ai_moderator.answer(
+            text,
+            context,
+            asker,
+            "",
+            current_time,
+            creative_model_for(runtime, settings),
+        )
+    except Exception:
+        logger.exception("implicit bot answer failed chat=%s", message.chat.id)
+        return False
+    await safe_reply_markdown(message, answer[:3900])
+    record_ask_exchange(message, bot, store, text, answer)
+    return True
+
+
+def is_addressed_to_bot(message: Message, bot: Bot, text: str) -> bool:
+    if message.reply_to_message and message.reply_to_message.from_user:
+        if message.reply_to_message.from_user.id == bot.id:
+            return True
+
+    normalized = text.casefold().strip()
+    username = (getattr(bot, "username", None) or "").casefold()
+    if username and f"@{username}" in normalized:
+        return True
+    return normalized.startswith(("бот", "модер", "moder", "moder,", "moder "))
+
+
+def looks_like_bot_question(message: Message, bot: Bot, text: str) -> bool:
+    if message.reply_to_message and message.reply_to_message.from_user:
+        if message.reply_to_message.from_user.id == bot.id:
+            return True
+    normalized = text.casefold()
+    return "?" in text or any(word in normalized for word in ("скажи", "объясни", "почему", "как ", "что "))
+
+
+def apply_natural_setting_request(chat_id: int, text: str, store: BotStore) -> str | None:
+    normalized = text.casefold()
+    model_id = extract_model_id(text)
+    try:
+        if model_id:
+            if any(marker in normalized for marker in ("маленьк", "дешев", "модерац", "modmodel")):
+                runtime = store.update_text_setting(chat_id, "moderation_model", model_id)
+                return f"Поставил дешевую модель модерации: `{runtime.moderation_model}`"
+            if any(marker in normalized for marker in ("картин", "image", "img")):
+                runtime = store.update_text_setting(chat_id, "image_model", model_id)
+                return f"Поставил модель картинок: `{runtime.image_model}`"
+            if any(marker in normalized for marker in ("видео", "video", "vid")):
+                runtime = store.update_text_setting(chat_id, "video_model", model_id)
+                return f"Поставил модель видео: `{runtime.video_model}`"
+            if any(marker in normalized for marker in ("модель", "model", "мощн", "больш")):
+                runtime = store.update_text_setting(chat_id, "ai_model", model_id)
+                return f"Поставил мощную модель для `/ask`, `/report`, `/appeal`: `{runtime.ai_model}`"
+
+        number = extract_setting_number(normalized)
+        if number is not None:
+            if "ask" in normalized or "аск" in normalized:
+                runtime = store.update_setting(chat_id, "ask_context", number)
+                return f"Контекст `/ask` теперь `{runtime.ask_context_limit}` сообщений."
+            if "модерац" in normalized or "провер" in normalized:
+                runtime = store.update_setting(chat_id, "moderation_context", number)
+                return f"Контекст модерации теперь `{runtime.moderation_context_limit}` сообщений."
+            if "молч" in normalized:
+                runtime = store.update_setting(chat_id, "silent_hours", number)
+                return f"Авто-поддержка молчащих теперь через `{runtime.silent_support_hours}` часов."
+
+        toggle_value = extract_toggle_value(normalized)
+        if toggle_value is not None:
+            if any(marker in normalized for marker in ("влез", "подшуч", "вмеш", "интервен", "interject")):
+                runtime = store.update_setting(chat_id, "creative_interjections", toggle_value)
+                state = "включены" if runtime.creative_interjections_enabled else "выключены"
+                return f"Самовольные творческие влезания теперь {state}."
+            if "анти" in normalized and "душ" in normalized:
+                runtime = store.update_setting(chat_id, "anti_bore", toggle_value)
+                state = "включен" if runtime.anti_bore_enabled else "выключен"
+                return f"Анти-душнила теперь {state}."
+
+        web_mode = extract_web_mode(normalized)
+        if web_mode:
+            runtime = store.update_text_setting(chat_id, "ask_web_mode", web_mode)
+            return f"Web-поиск `/ask` теперь `{runtime.ask_web_mode}`."
+    except ValueError:
+        return None
+    return None
+
+
+def extract_model_id(text: str) -> str | None:
+    match = re.search(r"[\w.-]+/[\w.-]+", text)
+    return match.group(0) if match else None
+
+
+def extract_setting_number(text: str) -> int | None:
+    match = re.search(r"\b(\d{1,3})\b", text)
+    return int(match.group(1)) if match else None
+
+
+def extract_toggle_value(text: str) -> int | None:
+    if any(word in text for word in ("выключ", "отключ", "off", "0")):
+        return 0
+    if any(word in text for word in ("включ", "on", "1")):
+        return 1
+    return None
+
+
+def extract_web_mode(text: str) -> str | None:
+    if "webmode" not in text and "поиск" not in text and "интернет" not in text:
+        return None
+    for mode in ("openrouter", "local", "auto", "off"):
+        if mode in text:
+            return mode
+    if "выключ" in text or "отключ" in text:
+        return "off"
+    if "включ" in text:
+        return "auto"
+    return None
+
+
+async def maybe_send_creative_interjection(
+    message: Message,
+    settings: Settings,
+    ai_moderator: AiModerator,
+    store: BotStore,
+    messages: list[StoredChatMessage],
+) -> None:
+    runtime = store.settings_for(message.chat.id)
+    if not runtime.creative_interjections_enabled:
+        return
+    if len(messages) < 10 or random.random() > 0.05:
+        return
+    if runtime.last_creative_interjection_at:
+        with suppress(ValueError):
+            last_sent = datetime.fromisoformat(runtime.last_creative_interjection_at)
+            if datetime.now(timezone.utc) - last_sent < timedelta(minutes=75):
+                return
+
+    context = format_context(stored_to_chat_messages(messages[-20:]))
+    try:
+        answer = await ai_moderator.answer(
+            "Влезь в разговор одним коротким сообщением в тему: дружески подшути, "
+            "поддержи вайб, не душни и не оскорбляй реально. 1-2 предложения максимум.",
+            context,
+            "Moder",
+            "",
+            datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S MSK, %A"),
+            creative_model_for(runtime, settings),
+        )
+    except Exception:
+        logger.exception("creative interjection failed chat=%s", message.chat.id)
+        return
+    store.mark_creative_interjection_sent(message.chat.id)
+    await safe_answer(message, answer[:800])
+
+
 async def maybe_count_support(message: Message, store: BotStore, text: str) -> None:
     if not message.from_user:
         return
@@ -1690,7 +1953,7 @@ async def is_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
 
 
-async def daily_schedule_loop(bot: Bot, store: BotStore) -> None:
+async def daily_schedule_loop(bot: Bot, store: BotStore, settings: Settings) -> None:
     while True:
         await sleep(60)
         now = datetime.now()
@@ -1753,6 +2016,13 @@ async def daily_schedule_loop(bot: Bot, store: BotStore) -> None:
                     chat_id,
                     render_stats(chat_id, store),
                     parse_mode=ParseMode.MARKDOWN,
+                )
+                balance = await openrouter_balance(settings)
+                await bot.send_message(
+                    chat_id,
+                    render_donation_message(settings, balance),
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_web_page_preview=True,
                 )
                 store.mark_daily_stats_sent(chat_id, today)
 

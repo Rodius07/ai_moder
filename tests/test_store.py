@@ -51,6 +51,14 @@ def test_store_disables_web_mode_with_numeric_setting(tmp_path) -> None:
     assert settings.ask_web_mode == "off"
 
 
+def test_store_toggles_creative_interjections(tmp_path) -> None:
+    store = BotStore(str(tmp_path / "state.json"))
+
+    settings = store.update_setting(1, "creative_interjections", 0)
+
+    assert settings.creative_interjections_enabled is False
+
+
 def test_store_tracks_daily_and_all_time_violations(tmp_path) -> None:
     store = BotStore(str(tmp_path / "state.json"))
 
