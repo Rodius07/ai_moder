@@ -231,6 +231,14 @@ async def ask(
         web_context = ""
         use_openrouter_web = should_use_openrouter_web(runtime.ask_web_mode, question, ai_moderator)
         use_local_web = should_use_local_web(runtime.ask_web_mode, question, ai_moderator)
+        logger.info(
+            "ask web decision chat=%s mode=%s local=%s openrouter=%s query=%r",
+            message.chat.id,
+            runtime.ask_web_mode,
+            use_local_web,
+            use_openrouter_web,
+            question[:120],
+        )
         if use_local_web:
             try:
                 web_results = await search_web_deep(question, runtime.ask_web_results)
@@ -631,6 +639,7 @@ async def support(message: Message, store: BotStore) -> None:
         random.choice(SUPPORT_MESSAGES).format(
             supporter=md_escape(supporter.full_name),
             target=md_escape(target.full_name),
+            action="поддержал",
             count=stats.all_supports,
         ),
         parse_mode=ParseMode.MARKDOWN,
@@ -1317,50 +1326,31 @@ def should_use_openrouter_web(
     question: str,
     ai_moderator: AiModerator,
 ) -> bool:
+    _ = question
     if not ai_moderator.base_url or "openrouter.ai" not in ai_moderator.base_url:
         return False
-    if mode == "openrouter":
-        return True
-    return mode == "auto" and should_use_web(question)
+    return mode == "openrouter"
 
 
 def should_use_local_web(mode: str, question: str, ai_moderator: AiModerator) -> bool:
-    if mode == "local":
+    _ = ai_moderator
+    if mode in {"auto", "local"}:
         return should_use_web(question)
-    if mode != "auto":
-        return False
-    if ai_moderator.base_url and "openrouter.ai" in ai_moderator.base_url:
-        return False
-    return should_use_web(question)
+    return False
 
 
 def should_use_web(question: str) -> bool:
     text = question.casefold()
-    fresh_markers = (
-        "сегодня",
-        "сейчас",
-        "последн",
-        "новост",
-        "курс",
-        "цена",
-        "сколько стоит",
-        "погода",
-        "расписан",
-        "когда выш",
-        "кто сейчас",
-        "какое число",
-        "какая дата",
-        "найди",
-        "поищи",
-        "загугли",
-        "ссылк",
-        "источник",
-        "цитат",
-        "интернет",
-        "в интернете",
-        "2026",
+    no_web_markers = (
+        "без интернета",
+        "не ищи",
+        "не гугли",
+        "без веб",
+        "без web",
+        "no web",
+        "offline",
     )
-    return any(marker in text for marker in fresh_markers) or bool(re.search(r"https?://", text))
+    return not any(marker in text for marker in no_web_markers)
 
 
 def settings_help(runtime) -> str:
@@ -1390,7 +1380,7 @@ def settings_help(runtime) -> str:
         `/settings image google/gemini-2.5-flash-image` - модель картинок OpenRouter
         `/settings image black-forest-labs/flux.2-pro` - пример Flux
         `/settings video x-ai/grok-imagine-video` - модель видео OpenRouter
-        `/settings webmode auto` - умный поиск только когда нужен
+        `/settings webmode auto` - мягкий локальный поиск для `/ask`
         `/settings webmode openrouter` - всегда дать модели web tool OpenRouter
         `/settings webmode local` - локальный DuckDuckGo + выдержки страниц
         `/settings webmode off` - интернет полностью выключен
