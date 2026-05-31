@@ -30,7 +30,7 @@ from tg_guard_bot.rules import RuleConfig, RuleEngine
 from tg_guard_bot.state import WarningStore
 from tg_guard_bot.store import BotStore, ModerationCase, StoredChatMessage, UserStats
 from tg_guard_bot.transcription import LocalTranscriber, transcribe_message_media
-from tg_guard_bot.video_generation import VideoGenerator
+from tg_guard_bot.video_generation import VideoGenerationError, VideoGenerator
 from tg_guard_bot.web_search import format_search_results, search_web_deep
 
 router = Router()
@@ -338,9 +338,21 @@ async def video(
     try:
         prompt_with_context = prompt_with_optional_context(prompt, message.chat.id, store)
         reference_image = await reply_image_data_url(message, bot)
-        video_bytes, filename = await video_generator.generate(prompt_with_context, model, reference_image)
+        duration = requested_video_duration(prompt)
+        resolution = requested_video_resolution(prompt)
+        video_bytes, filename = await video_generator.generate(
+            prompt_with_context,
+            model,
+            reference_image,
+            duration=duration,
+            resolution=resolution,
+        )
     except TimeoutError:
         await thinking.edit_text("Видео еще варится дольше обычного. Попробуй чуть позже или короче промпт.")
+        return
+    except VideoGenerationError as error:
+        logger.warning("video generation rejected chat=%s model=%s error=%s", message.chat.id, model, error)
+        await thinking.edit_text(f"Видео не принял OpenRouter:\n`{md_escape(str(error)[:1200])}`", parse_mode=ParseMode.MARKDOWN)
         return
     except Exception:
         logger.exception("video generation failed chat=%s model=%s", message.chat.id, model)
@@ -1374,6 +1386,20 @@ def requested_context_limit(prompt: str, default: int = 0) -> int:
     if wants_context(prompt):
         return max(default, 20)
     return default
+
+
+def requested_video_duration(prompt: str) -> int | None:
+    match = re.search(r"(\d{1,2})\s*(?:сек|секунд|seconds?|s\b)", prompt.casefold())
+    if not match:
+        return None
+    return max(1, min(15, int(match.group(1))))
+
+
+def requested_video_resolution(prompt: str) -> str | None:
+    match = re.search(r"\b(480p|720p|1080p|1k|2k|4k)\b", prompt.casefold())
+    if not match:
+        return None
+    return match.group(1).upper() if match.group(1).endswith("k") else match.group(1)
 
 
 def wants_context(prompt: str) -> bool:

@@ -11,6 +11,10 @@ OPENROUTER_BASE_URL = "https://openrouter.ai"
 OPENROUTER_VIDEOS_URL = f"{OPENROUTER_BASE_URL}/api/v1/videos"
 
 
+class VideoGenerationError(RuntimeError):
+    pass
+
+
 @dataclass
 class VideoGenerator:
     api_key: str
@@ -37,26 +41,30 @@ class VideoGenerator:
         prompt: str,
         model: str | None = None,
         reference_image_data_url: str | None = None,
+        duration: int | None = None,
+        resolution: str | None = None,
         timeout_seconds: int = 420,
     ) -> tuple[bytes, str]:
         payload: dict[str, object] = {
             "model": model or self.model,
             "prompt": prompt,
             "aspect_ratio": self.aspect_ratio,
-            "duration": self.duration,
-            "resolution": self.resolution,
+            "duration": duration or self.duration,
+            "resolution": resolution or self.resolution,
         }
         if reference_image_data_url:
             payload["frame_images"] = [
                 {
+                    "type": "image_url",
+                    "image_url": {"url": reference_image_data_url},
                     "frame_type": "first_frame",
-                    "image_url": reference_image_data_url,
                 }
             ]
 
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             response = await client.post(OPENROUTER_VIDEOS_URL, headers=self.headers(), json=payload)
-            response.raise_for_status()
+            if response.is_error:
+                raise VideoGenerationError(response.text[:1000] or response.reason_phrase)
             job = response.json()
             polling_url = absolute_openrouter_url(job["polling_url"])
 
