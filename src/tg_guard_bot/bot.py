@@ -241,13 +241,14 @@ async def ask(
         )
         if use_local_web:
             try:
-                web_results = await search_web_deep(question, runtime.ask_web_results)
+                search_query = web_search_query(question, context_messages)
+                web_results = await search_web_deep(search_query, runtime.ask_web_results)
                 web_context = format_search_results(web_results)
                 logger.info(
                     "ask local web search chat=%s results=%s query=%r",
                     message.chat.id,
                     len(web_results),
-                    question[:120],
+                    search_query[:120],
                 )
             except Exception:
                 logger.exception("ask web search failed chat=%s query=%r", message.chat.id, question)
@@ -1328,15 +1329,12 @@ def should_use_openrouter_web(
 ) -> bool:
     if not ai_moderator.base_url or "openrouter.ai" not in ai_moderator.base_url:
         return False
-    return mode in {"auto", "openrouter"} and should_use_web(question)
+    return mode == "openrouter" and should_use_web(question)
 
 
 def should_use_local_web(mode: str, question: str, ai_moderator: AiModerator) -> bool:
-    if mode == "local":
-        return should_use_web(question)
-    if mode == "auto" and (
-        not ai_moderator.base_url or "openrouter.ai" not in ai_moderator.base_url
-    ):
+    _ = ai_moderator
+    if mode in {"auto", "local"}:
         return should_use_web(question)
     return False
 
@@ -1382,7 +1380,7 @@ def settings_help(runtime) -> str:
         `/settings image google/gemini-2.5-flash-image` - модель картинок OpenRouter
         `/settings image black-forest-labs/flux.2-pro` - пример Flux
         `/settings video x-ai/grok-imagine-video` - модель видео OpenRouter
-        `/settings webmode auto` - OpenRouter `:online` или локальный поиск
+        `/settings webmode auto` - локальный поиск DuckDuckGo
         `/settings webmode openrouter` - всегда OpenRouter `:online`
         `/settings webmode local` - локальный DuckDuckGo + выдержки страниц
         `/settings webmode off` - интернет полностью выключен
@@ -1490,6 +1488,45 @@ def record_ask_exchange(
         f"Ответ /ask: {answer[:1500]}",
         limit=100,
     )
+
+
+def web_search_query(question: str, context_messages: list[ChatMessage]) -> str:
+    query = question.strip()
+    if not query:
+        return query
+    if not should_mix_context_into_search(query):
+        return query
+
+    snippets: list[str] = []
+    for message in reversed(context_messages):
+        text = message.text.strip()
+        if not text or text == query or text.startswith("/ask"):
+            continue
+        if message.user_name.casefold() == "moder" or text.startswith("Ответ /ask:"):
+            continue
+        snippets.append(text[:180])
+        if len(snippets) >= 4:
+            break
+    if not snippets:
+        return query
+    return (query + " " + " ".join(reversed(snippets)))[:700]
+
+
+def should_mix_context_into_search(question: str) -> bool:
+    text = question.casefold()
+    markers = (
+        "что за трек",
+        "что за песн",
+        "что это",
+        "это что",
+        "откуда",
+        "кто поет",
+        "кто поёт",
+        "название",
+        "что за мем",
+        "про что",
+    )
+    return len(text) <= 80 or any(marker in text for marker in markers)
 
 
 def requested_context_limit(prompt: str, default: int = 0) -> int:
@@ -1659,7 +1696,8 @@ async def maybe_handle_bot_addressed_message(
     if not looks_like_bot_question(message, bot, text):
         return False
 
-    context = format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, runtime.ask_context_limit)))
+    context_messages = stored_to_chat_messages(store.latest_messages(message.chat.id, runtime.ask_context_limit))
+    context = format_context(context_messages)
     asker = f"{message.from_user.full_name} ({message.from_user.id})" if message.from_user else ""
     current_time = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S MSK, %A")
     use_openrouter_web = should_use_openrouter_web(runtime.ask_web_mode, text, ai_moderator)
@@ -1675,13 +1713,14 @@ async def maybe_handle_bot_addressed_message(
     )
     if use_local_web:
         try:
-            web_results = await search_web_deep(text, runtime.ask_web_results)
+            search_query = web_search_query(text, context_messages)
+            web_results = await search_web_deep(search_query, runtime.ask_web_results)
             web_context = format_search_results(web_results)
             logger.info(
                 "implicit answer local web search chat=%s results=%s query=%r",
                 message.chat.id,
                 len(web_results),
-                text[:120],
+                search_query[:120],
             )
         except Exception:
             logger.exception("implicit answer web search failed chat=%s query=%r", message.chat.id, text)
