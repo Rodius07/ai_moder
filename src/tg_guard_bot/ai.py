@@ -8,6 +8,10 @@ from openai import AsyncOpenAI
 from tg_guard_bot.models import ModerationResult, Verdict
 
 
+def openrouter_online_model(model: str) -> str:
+    return model if model.endswith(":online") else f"{model}:online"
+
+
 SYSTEM_PROMPT = """
 Ты модератор Telegram-чата. Проверяй сообщения по правилам:
 1. Запрещены спам, реклама, мошенничество, реферальные ссылки и навязчивый промо.
@@ -112,22 +116,13 @@ class AiModerator:
         use_openrouter_web: bool = False,
         web_results: int = 4,
     ) -> str:
+        request_model = model or self.model
         extra_body = None
         if use_openrouter_web:
-            extra_body = {
-                "tools": [
-                    {
-                        "type": "openrouter:web_search",
-                        "parameters": {
-                            "engine": "auto",
-                            "max_results": max(1, min(8, web_results)),
-                            "max_total_results": max(1, min(12, web_results * 2)),
-                        },
-                    }
-                ]
-            }
+            request_model = openrouter_online_model(request_model)
+            _ = web_results
         response = await self.client.chat.completions.create(
-            model=model or self.model,
+            model=request_model,
             temperature=0.3,
             extra_body=extra_body,
             messages=[
@@ -148,9 +143,11 @@ class AiModerator:
                         "и текущее время отвечай по полю 'Текущая дата и время', а не по памяти. "
                         "Если вопрос выглядит как отдельная фраза, мем, цитата, строчка из трека "
                         "или культурная отсылка, сначала попробуй распознать эту отсылку и не "
-                        "притягивай ее к предыдущей теме чата без явного вопроса. Для песен можно "
-                        "назвать трек/исполнителя и подыграть вайбом, но нельзя продолжать или "
-                        "переписывать текст песни длинными фрагментами. Никогда не придумывай "
+                        "притягивай ее к предыдущей теме чата без явного вопроса. Можно кидать "
+                        "ссылки, короткие цитаты, мемные находки и приколы из интернета, если они "
+                        "уместны. Для песен можно назвать трек/исполнителя и подыграть вайбом, "
+                        "но нельзя продолжать или переписывать текст песни длинными фрагментами. "
+                        "Никогда не придумывай "
                         "платежные реквизиты, номера карт, адреса кошельков, апгрейды моделей "
                         "или админские изменения настроек. Если просят реквизиты, отправляй к "
                         "команде /donate. Настройки меняются только явными командами /settings."

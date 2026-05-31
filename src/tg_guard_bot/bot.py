@@ -1326,15 +1326,17 @@ def should_use_openrouter_web(
     question: str,
     ai_moderator: AiModerator,
 ) -> bool:
-    _ = question
     if not ai_moderator.base_url or "openrouter.ai" not in ai_moderator.base_url:
         return False
-    return mode == "openrouter"
+    return mode in {"auto", "openrouter"} and should_use_web(question)
 
 
 def should_use_local_web(mode: str, question: str, ai_moderator: AiModerator) -> bool:
-    _ = ai_moderator
-    if mode in {"auto", "local"}:
+    if mode == "local":
+        return should_use_web(question)
+    if mode == "auto" and (
+        not ai_moderator.base_url or "openrouter.ai" not in ai_moderator.base_url
+    ):
         return should_use_web(question)
     return False
 
@@ -1380,8 +1382,8 @@ def settings_help(runtime) -> str:
         `/settings image google/gemini-2.5-flash-image` - модель картинок OpenRouter
         `/settings image black-forest-labs/flux.2-pro` - пример Flux
         `/settings video x-ai/grok-imagine-video` - модель видео OpenRouter
-        `/settings webmode auto` - мягкий локальный поиск для `/ask`
-        `/settings webmode openrouter` - всегда дать модели web tool OpenRouter
+        `/settings webmode auto` - OpenRouter `:online` или локальный поиск
+        `/settings webmode openrouter` - всегда OpenRouter `:online`
         `/settings webmode local` - локальный DuckDuckGo + выдержки страниц
         `/settings webmode off` - интернет полностью выключен
         `/settings web 1` - включить интернет для `/ask`
@@ -1660,14 +1662,39 @@ async def maybe_handle_bot_addressed_message(
     context = format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, runtime.ask_context_limit)))
     asker = f"{message.from_user.full_name} ({message.from_user.id})" if message.from_user else ""
     current_time = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S MSK, %A")
+    use_openrouter_web = should_use_openrouter_web(runtime.ask_web_mode, text, ai_moderator)
+    use_local_web = should_use_local_web(runtime.ask_web_mode, text, ai_moderator)
+    web_context = ""
+    logger.info(
+        "implicit answer web decision chat=%s mode=%s local=%s openrouter=%s query=%r",
+        message.chat.id,
+        runtime.ask_web_mode,
+        use_local_web,
+        use_openrouter_web,
+        text[:120],
+    )
+    if use_local_web:
+        try:
+            web_results = await search_web_deep(text, runtime.ask_web_results)
+            web_context = format_search_results(web_results)
+            logger.info(
+                "implicit answer local web search chat=%s results=%s query=%r",
+                message.chat.id,
+                len(web_results),
+                text[:120],
+            )
+        except Exception:
+            logger.exception("implicit answer web search failed chat=%s query=%r", message.chat.id, text)
     try:
         answer = await ai_moderator.answer(
             text,
             context,
             asker,
-            "",
+            web_context,
             current_time,
             creative_model_for(runtime, settings),
+            use_openrouter_web,
+            runtime.ask_web_results,
         )
     except Exception:
         logger.exception("implicit bot answer failed chat=%s", message.chat.id)
