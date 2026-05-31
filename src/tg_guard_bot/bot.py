@@ -1627,10 +1627,9 @@ def is_addressed_to_bot(message: Message, bot: Bot, text: str) -> bool:
             return True
 
     normalized = text.casefold().strip()
-    username = (getattr(bot, "username", None) or "").casefold()
-    if username and f"@{username}" in normalized:
+    if "@moderaaaatorrrrr_bot" in normalized:
         return True
-    return normalized.startswith(("бот", "модер", "moder", "moder,", "moder "))
+    return bool(re.search(r"(^|\s)(бот|ботик|модер|moder)(\s|,|!|\\?|$)", normalized))
 
 
 def looks_like_bot_question(message: Message, bot: Bot, text: str) -> bool:
@@ -1638,7 +1637,23 @@ def looks_like_bot_question(message: Message, bot: Bot, text: str) -> bool:
         if message.reply_to_message.from_user.id == bot.id:
             return True
     normalized = text.casefold()
-    return "?" in text or any(word in normalized for word in ("скажи", "объясни", "почему", "как ", "что "))
+    return (
+        "?" in text
+        or any(
+            word in normalized
+            for word in (
+                "скажи",
+                "ответь",
+                "объясни",
+                "почему",
+                "как ",
+                "что ",
+                "как жизнь",
+                "че ",
+                "чё ",
+            )
+        )
+    )
 
 
 def apply_natural_setting_request(chat_id: int, text: str, store: BotStore) -> str | None:
