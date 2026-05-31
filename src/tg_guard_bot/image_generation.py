@@ -20,7 +20,12 @@ class ImageGenerator:
     site_url: str | None = None
     app_name: str | None = None
 
-    async def generate(self, prompt: str, model: str | None = None) -> tuple[bytes, str]:
+    async def generate(
+        self,
+        prompt: str,
+        model: str | None = None,
+        reference_image_data_url: str | None = None,
+    ) -> tuple[bytes, str]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -30,9 +35,15 @@ class ImageGenerator:
         if self.app_name:
             headers["X-OpenRouter-Title"] = self.app_name
 
+        content: str | list[dict[str, str | dict[str, str]]] = prompt
+        if reference_image_data_url:
+            content = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": reference_image_data_url}},
+            ]
         payload = {
             "model": model or self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
             "modalities": ["image", "text"],
             "image_config": {
                 "aspect_ratio": self.aspect_ratio,

@@ -34,10 +34,12 @@ def test_store_updates_web_mode_and_image_model(tmp_path) -> None:
 
     settings = store.update_text_setting(1, "ask_web_mode", "openrouter")
     settings = store.update_text_setting(1, "image_model", "black-forest-labs/flux.2-pro")
+    settings = store.update_text_setting(1, "video_model", "x-ai/grok-imagine-video")
 
     assert settings.ask_web_mode == "openrouter"
     assert settings.ask_web_enabled is True
     assert settings.image_model == "black-forest-labs/flux.2-pro"
+    assert settings.video_model == "x-ai/grok-imagine-video"
 
 
 def test_store_disables_web_mode_with_numeric_setting(tmp_path) -> None:

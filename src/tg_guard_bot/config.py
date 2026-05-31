@@ -28,8 +28,16 @@ class Settings(BaseSettings):
     )
     openrouter_image_aspect_ratio: str = Field("1:1", alias="OPENROUTER_IMAGE_ASPECT_RATIO")
     openrouter_image_size: str = Field("1K", alias="OPENROUTER_IMAGE_SIZE")
+    openrouter_video_model: str = Field("x-ai/grok-imagine-video", alias="OPENROUTER_VIDEO_MODEL")
+    openrouter_video_aspect_ratio: str = Field("16:9", alias="OPENROUTER_VIDEO_ASPECT_RATIO")
+    openrouter_video_duration: int = Field(5, alias="OPENROUTER_VIDEO_DURATION")
+    openrouter_video_resolution: str = Field("720p", alias="OPENROUTER_VIDEO_RESOLUTION")
     chat_rules_path: str | None = Field("chat_rules.md", alias="CHAT_RULES_PATH")
     data_path: str = Field("data/bot_state.json", alias="DATA_PATH")
+    donation_ton_address: str | None = Field(None, alias="DONATION_TON_ADDRESS")
+    donation_usdt_address: str | None = Field(None, alias="DONATION_USDT_ADDRESS")
+    donation_usdt_network: str = Field("TON/TRC20", alias="DONATION_USDT_NETWORK")
+    donation_rub_details: str | None = Field(None, alias="DONATION_RUB_DETAILS")
 
     delete_high_confidence: bool = Field(True, alias="DELETE_HIGH_CONFIDENCE")
     warn_in_chat: bool = Field(True, alias="WARN_IN_CHAT")
@@ -56,6 +64,9 @@ class Settings(BaseSettings):
         "openrouter_site_url",
         "openrouter_app_name",
         "chat_rules_path",
+        "donation_ton_address",
+        "donation_usdt_address",
+        "donation_rub_details",
         "whisper_language",
         mode="before",
     )

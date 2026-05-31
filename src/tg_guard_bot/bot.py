@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import base64
+import mimetypes
 import random
 import re
 import textwrap
 from asyncio import create_task, sleep
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -27,6 +30,7 @@ from tg_guard_bot.rules import RuleConfig, RuleEngine
 from tg_guard_bot.state import WarningStore
 from tg_guard_bot.store import BotStore, ModerationCase, StoredChatMessage, UserStats
 from tg_guard_bot.transcription import LocalTranscriber, transcribe_message_media
+from tg_guard_bot.video_generation import VideoGenerator
 from tg_guard_bot.web_search import format_search_results, search_web_deep
 
 router = Router()
@@ -80,6 +84,19 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         if settings.openai_api_key
         else None
     )
+    video_generator = (
+        VideoGenerator(
+            api_key=settings.openai_api_key,
+            model=settings.openrouter_video_model,
+            aspect_ratio=settings.openrouter_video_aspect_ratio,
+            duration=settings.openrouter_video_duration,
+            resolution=settings.openrouter_video_resolution,
+            site_url=settings.openrouter_site_url,
+            app_name=settings.openrouter_app_name,
+        )
+        if settings.openai_api_key
+        else None
+    )
 
     dp = Dispatcher(
         settings=settings,
@@ -90,6 +107,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         store=store,
         transcriber=transcriber,
         image_generator=image_generator,
+        video_generator=video_generator,
     )
     dp.startup.register(on_startup)
     dp.include_router(router)
@@ -105,8 +123,10 @@ async def on_startup(bot: Bot, store: BotStore, settings: Settings) -> None:
             BotCommand(command="support", description="поддержать брата ответом на сообщение"),
             BotCommand(command="ask", description="задать вопрос ИИ с контекстом чата"),
             BotCommand(command="image", description="сгенерировать картинку через OpenRouter"),
+            BotCommand(command="video", description="сгенерировать видео через OpenRouter"),
             BotCommand(command="appeal", description="апелляция по спорному сообщению"),
             BotCommand(command="report", description="донести на спорное сообщение"),
+            BotCommand(command="donate", description="поддержать работу бота"),
             BotCommand(command="warns", description="мои предупреждения"),
             BotCommand(command="resetstats", description="админ: обнулить счетчики"),
         ]
@@ -134,7 +154,7 @@ async def start(message: Message) -> None:
     await message.answer(
         "*Я на посту братства.*\n"
         "Проверяю чат, слушаю голосовые, помню контекст и иногда мягко хлопаю по плечу.\n\n"
-        "Команды: /settings, /stats, /rules, /ask, /image, /appeal, /report",
+        "Команды: /settings, /stats, /rules, /ask, /image, /video, /appeal, /report, /donate",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -155,6 +175,7 @@ async def rules(message: Message, settings: Settings, store: BotStore) -> None:
         f"- модель модерации: `{moderation_model_for(runtime, settings)}`\n"
         f"- модель /ask, /report, /appeal: `{creative_model_for(runtime, settings)}`\n"
         f"- модель картинок: `{runtime.image_model or settings.openrouter_image_model}`\n"
+        f"- модель видео: `{runtime.video_model or settings.openrouter_video_model}`\n"
         f"- web-поиск /ask: `{runtime.ask_web_mode}`\n"
         f"- авто-поддержка молчащих: `{runtime.silent_support_hours}` часов\n"
         f"- речь в аудио/видео: `{'включена' if settings.enable_local_transcription else 'выключена'}`\n"
@@ -193,14 +214,13 @@ async def ask(
     thinking = await message.answer("Думаю...")
     try:
         runtime = store.settings_for(message.chat.id)
-        context_messages = stored_to_chat_messages(
-            store.latest_messages(message.chat.id, runtime.ask_context_limit)
-        )
+        context_limit = requested_context_limit(question, runtime.ask_context_limit)
+        context_messages = stored_to_chat_messages(store.latest_messages(message.chat.id, context_limit))
         context = format_context(context_messages)
         logger.info(
             "ask context chat=%s limit=%s count=%s preview=%s",
             message.chat.id,
-            runtime.ask_context_limit,
+            context_limit,
             len(context_messages),
             context[:500].replace("\n", " | "),
         )
@@ -251,6 +271,7 @@ async def ask(
 async def image(
     message: Message,
     command: CommandObject,
+    bot: Bot,
     image_generator: ImageGenerator | None,
     settings: Settings,
     store: BotStore,
@@ -270,7 +291,9 @@ async def image(
     runtime = store.settings_for(message.chat.id)
     model = runtime.image_model or settings.openrouter_image_model
     try:
-        image_bytes, filename = await image_generator.generate(prompt, model)
+        prompt_with_context = prompt_with_optional_context(prompt, message.chat.id, store)
+        reference_image = await reply_image_data_url(message, bot)
+        image_bytes, filename = await image_generator.generate(prompt_with_context, model, reference_image)
     except Exception:
         logger.exception("image generation failed chat=%s model=%s", message.chat.id, model)
         await thinking.edit_text(
@@ -287,6 +310,73 @@ async def image(
     )
     with suppress(TelegramBadRequest, TelegramForbiddenError):
         await thinking.delete()
+
+
+@router.message(Command("video", "vid"))
+async def video(
+    message: Message,
+    command: CommandObject,
+    bot: Bot,
+    video_generator: VideoGenerator | None,
+    settings: Settings,
+    store: BotStore,
+) -> None:
+    prompt = (command.args or "").strip()
+    if not prompt:
+        await message.answer(
+            "Напиши промпт после команды: `/video братство идет к разжатости, cinematic`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if not video_generator:
+        await message.answer("Видео выключено: нужен `OPENAI_API_KEY` от OpenRouter.")
+        return
+
+    thinking = await message.answer("Запустил видео через OpenRouter. Это может занять пару минут...")
+    runtime = store.settings_for(message.chat.id)
+    model = runtime.video_model or settings.openrouter_video_model
+    try:
+        prompt_with_context = prompt_with_optional_context(prompt, message.chat.id, store)
+        reference_image = await reply_image_data_url(message, bot)
+        video_bytes, filename = await video_generator.generate(prompt_with_context, model, reference_image)
+    except TimeoutError:
+        await thinking.edit_text("Видео еще варится дольше обычного. Попробуй чуть позже или короче промпт.")
+        return
+    except Exception:
+        logger.exception("video generation failed chat=%s model=%s", message.chat.id, model)
+        await thinking.edit_text(
+            "Видео не собралось. Проверь модель, баланс OpenRouter и параметры duration/resolution."
+        )
+        return
+
+    await message.answer_video(
+        BufferedInputFile(video_bytes, filename=filename),
+        caption=f"Видео по запросу: {md_escape(prompt[:900])}"[:1024],
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    with suppress(TelegramBadRequest, TelegramForbiddenError):
+        await thinking.delete()
+
+
+@router.message(Command("donate", "donat"))
+async def donate(message: Message, settings: Settings) -> None:
+    lines = [
+        "*Сбор на жизнь бота*",
+        "",
+        "Если бот хоть раз спас братство от бетонного напряжения, можно докинуть топлива:",
+        "",
+    ]
+    if settings.donation_ton_address:
+        lines.append(f"*TON:* `{settings.donation_ton_address}`")
+    if settings.donation_usdt_address:
+        lines.append(f"*USDT ({md_escape(settings.donation_usdt_network)}):* `{settings.donation_usdt_address}`")
+    if settings.donation_rub_details:
+        lines.append(f"*Рубли:* `{settings.donation_rub_details}`")
+    if len(lines) == 4:
+        lines.append("Реквизиты пока не заданы в `.env`: `DONATION_TON_ADDRESS`, `DONATION_USDT_ADDRESS`, `DONATION_RUB_DETAILS`.")
+    lines.append("")
+    lines.append("Донат добровольный. Разжатость не продается, но сервер сам себя не оплатит.")
+    await message.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
 @router.message(Command("appeal", "apell"))
@@ -453,6 +543,7 @@ async def settings_menu(message: Message, command: CommandObject, store: BotStor
                 "ai_model",
                 "moderation_model",
                 "image_model",
+                "video_model",
                 "ask_web_mode",
             }:
                 runtime = store.update_text_setting(
@@ -1058,6 +1149,10 @@ def normalize_setting_name(name: str) -> str:
         "img": "image_model",
         "image_model": "image_model",
         "картинки": "image_model",
+        "video": "video_model",
+        "vid": "video_model",
+        "video_model": "video_model",
+        "видео": "video_model",
         "webmode": "ask_web_mode",
         "web_mode": "ask_web_mode",
         "search": "ask_web_mode",
@@ -1145,6 +1240,7 @@ def settings_help(runtime) -> str:
         Модель модерации: `{runtime.moderation_model or 'из .env'}`
         Модель `/ask`, `/report`, `/appeal`: `{runtime.ai_model or 'из .env'}`
         Модель картинок: `{runtime.image_model or 'из .env'}`
+        Модель видео: `{runtime.video_model or 'из .env'}`
         Интернет для `/ask`: `{'включен' if runtime.ask_web_enabled else 'выключен'}`
         Режим web-поиска: `{runtime.ask_web_mode}`
         Web-результатов для `/ask`: `{runtime.ask_web_results}`
@@ -1159,6 +1255,7 @@ def settings_help(runtime) -> str:
         `/settings model anthropic/claude-sonnet-latest` - пример Anthropic для умных команд
         `/settings image google/gemini-2.5-flash-image` - модель картинок OpenRouter
         `/settings image black-forest-labs/flux.2-pro` - пример Flux
+        `/settings video x-ai/grok-imagine-video` - модель видео OpenRouter
         `/settings webmode auto` - умный поиск только когда нужен
         `/settings webmode openrouter` - всегда дать модели web tool OpenRouter
         `/settings webmode local` - локальный DuckDuckGo + выдержки страниц
@@ -1262,6 +1359,82 @@ def record_ask_exchange(
         f"Ответ /ask: {answer[:1500]}",
         limit=100,
     )
+
+
+def requested_context_limit(prompt: str, default: int = 0) -> int:
+    text = prompt.casefold()
+    patterns = (
+        r"(?:последн\w*|last)\s+(\d{1,2})",
+        r"(\d{1,2})\s+(?:последн\w*|сообщен\w*)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return max(1, min(50, int(match.group(1))))
+    if wants_context(prompt):
+        return max(default, 20)
+    return default
+
+
+def wants_context(prompt: str) -> bool:
+    text = prompt.casefold()
+    return any(
+        marker in text
+        for marker in (
+            "по контексту",
+            "по последним",
+            "из последних",
+            "на основе последних",
+            "по сообщениям",
+            "по переписке",
+            "что выше",
+            "которую я скинул",
+            "которое я скинул",
+        )
+    )
+
+
+def prompt_with_optional_context(prompt: str, chat_id: int, store: BotStore) -> str:
+    limit = requested_context_limit(prompt, 0)
+    if not limit:
+        return prompt
+    context = format_context(stored_to_chat_messages(store.latest_messages(chat_id, limit)))
+    if not context:
+        return prompt
+    return (
+        f"{prompt}\n\n"
+        f"Контекст последних {limit} сообщений чата, используй только если он реально помогает:\n"
+        f"{context[:5000]}"
+    )
+
+
+async def reply_image_data_url(message: Message, bot: Bot) -> str | None:
+    replied = message.reply_to_message
+    if not replied:
+        return None
+
+    file_id = None
+    mime_type = None
+    if replied.photo:
+        file_id = replied.photo[-1].file_id
+        mime_type = "image/jpeg"
+    elif replied.document and (replied.document.mime_type or "").startswith("image/"):
+        file_id = replied.document.file_id
+        mime_type = replied.document.mime_type
+
+    if not file_id:
+        return None
+
+    file = await bot.get_file(file_id)
+    if not file.file_path:
+        return None
+    if not mime_type:
+        mime_type = mimetypes.guess_type(file.file_path)[0] or "image/jpeg"
+
+    buffer = BytesIO()
+    await bot.download_file(file.file_path, buffer)
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+    return f"data:{mime_type};base64,{encoded}"
 
 
 async def maybe_send_anti_bore(

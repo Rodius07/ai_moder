@@ -12,7 +12,9 @@ MVP Telegram-бота для модерации группового чата.
 - отправляет спорные случаи в админ-чат;
 - отвечает на вопросы через `/ask`;
 - ищет в интернете для `/ask`, когда вопрос требует свежих данных;
-- генерирует картинки через OpenRouter по `/image`.
+- генерирует картинки через OpenRouter по `/image`;
+- генерирует видео через OpenRouter по `/video`;
+- показывает реквизиты поддержки проекта по `/donate`.
 
 Бот никогда не кикает, не банит пользователей из чата и сам не удаляет сообщения.
 Он может выдать предупреждение, временно ограничить отправку сообщений или отправить
@@ -51,6 +53,8 @@ OPENAI_MODEL=openai/gpt-5-mini
 OPENAI_MODERATION_MODEL=google/gemini-2.0-flash-lite-001
 OPENROUTER_APP_NAME=TG Guard Bot
 OPENROUTER_IMAGE_MODEL=google/gemini-2.5-flash-image
+OPENROUTER_VIDEO_MODEL=x-ai/grok-imagine-video
+OPENROUTER_VIDEO_DURATION=5
 ```
 
 Запуск:
@@ -79,8 +83,10 @@ python -m tg_guard_bot.main
 - `/stats` - статистика нарушений и разжатость дня;
 - `/ask вопрос` - задать вопрос ИИ;
 - `/image промпт` или `/img промпт` - сгенерировать картинку через OpenRouter;
+- `/video промпт` или `/vid промпт` - сгенерировать видео через OpenRouter;
 - `/appeal` ответом на страйк - пересмотреть спорное решение;
 - `/report` ответом на сообщение - попросить бота проверить нарушение;
+- `/donate` - реквизиты поддержки бота;
 - `/warns` - посмотреть свои предупреждения.
 
 Полезные настройки в чате:
@@ -93,6 +99,11 @@ python -m tg_guard_bot.main
 - `/settings model openai/gpt-5-mini` - мощная общая модель для `/ask`, `/report`, `/appeal`;
 - `/settings image google/gemini-2.5-flash-image` - модель картинок;
 - `/settings image black-forest-labs/flux.2-pro` - пример альтернативной модели.
+- `/settings video x-ai/grok-imagine-video` - модель видео.
+
+`/ask`, `/image` и `/video` понимают явный запрос контекста: например,
+`/image сделай мем по последним 15 сообщениям`. Для изменения картинки или
+первого кадра видео ответьте командой `/image` или `/video` на сообщение с фото.
 
 ## Как работает модерация
 

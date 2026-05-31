@@ -17,6 +17,7 @@ class ChatRuntimeSettings:
     ai_model: str | None = None
     moderation_model: str | None = None
     image_model: str | None = None
+    video_model: str | None = None
     silent_support_hours: int = 72
     anti_bore_enabled: bool = True
     last_daily_stats_date: str | None = None
@@ -156,6 +157,8 @@ class BotStore:
             settings.moderation_model = value.strip() or None
         elif name == "image_model":
             settings.image_model = value.strip() or None
+        elif name == "video_model":
+            settings.video_model = value.strip() or None
         elif name == "ask_web_mode":
             mode = value.strip().casefold()
             if mode not in {"auto", "openrouter", "local", "off"}:
