@@ -24,6 +24,24 @@ def test_duckduckgo_html_parser_extracts_results() -> None:
     assert parser.results[0].snippet == "Useful snippet here"
 
 
+def test_duckduckgo_lite_parser_extracts_results() -> None:
+    parser = DuckDuckGoHtmlParser()
+    parser.feed(
+        """
+        <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Flite" class='result-link'>
+            Lite title
+        </a>
+        <td class='result-snippet'>Lite snippet here</td>
+        """
+    )
+    parser.close()
+
+    assert len(parser.results) == 1
+    assert parser.results[0].title == "Lite title"
+    assert parser.results[0].url == "https://example.com/lite"
+    assert parser.results[0].snippet == "Lite snippet here"
+
+
 def test_clean_duckduckgo_url_keeps_regular_url() -> None:
     assert clean_duckduckgo_url("https://example.com") == "https://example.com"
 

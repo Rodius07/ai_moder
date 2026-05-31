@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 
 from tg_guard_bot.models import ModerationResult, Verdict
+
+
+logger = logging.getLogger(__name__)
 
 
 def openrouter_online_model(model: str) -> str:
@@ -121,6 +125,20 @@ class AiModerator:
         if use_openrouter_web:
             request_model = openrouter_online_model(request_model)
             _ = web_results
+        logger.info(
+            "ai answer request model=%s openrouter_online=%s has_local_web_context=%s",
+            request_model,
+            use_openrouter_web,
+            bool(web_context.strip()),
+        )
+        displayed_web_context = web_context.strip()
+        if use_openrouter_web and not displayed_web_context:
+            displayed_web_context = (
+                "OpenRouter online-поиск включен через суффикс :online. "
+                "Если вопрос требует актуальных фактов, поиска цитаты, трека, мемной отсылки "
+                "или ссылки, используй online-поиск модели. Не говори 'веб пустой' только из-за "
+                "того, что локальный web-контекст не приложен."
+            )
         response = await self.client.chat.completions.create(
             model=request_model,
             temperature=0.3,
@@ -138,8 +156,11 @@ class AiModerator:
                         "Если вопрос содержит 'мой', 'мне', 'меня' или 'я', относись к автору "
                         "вопроса, а не к последнему человеку из контекста. Если дан web-контекст, "
                         "используй его для фактов о текущих событиях и добавляй ссылки, когда они "
-                        "помогают проверить ответ. Если web-контекст пустой или не по теме, честно "
-                        "скажи, что точных свежих данных нет. На вопросы про сегодняшнюю дату "
+                        "помогают проверить ответ. Если включен OpenRouter online-поиск, пользуйся "
+                        "им для актуальных фактов, распознавания цитат, треков и мемов; не заявляй, "
+                        "что 'веб пустой', если локальный web-контекст просто не приложен. "
+                        "Если после поиска всё равно нет уверенного совпадения, честно скажи, что "
+                        "не нашел надежного источника. На вопросы про сегодняшнюю дату "
                         "и текущее время отвечай по полю 'Текущая дата и время', а не по памяти. "
                         "Если вопрос выглядит как отдельная фраза, мем, цитата, строчка из трека "
                         "или культурная отсылка, сначала попробуй распознать эту отсылку и не "
@@ -159,7 +180,7 @@ class AiModerator:
                         f"Автор вопроса: {asker}\n\n"
                         f"Текущая дата и время: {current_time or 'не задано'}\n\n"
                         f"Контекст последних сообщений:\n{context[:5000]}\n\n"
-                        f"Web-контекст:\n{web_context[:5000] or 'нет данных'}\n\n"
+                        f"Web-контекст:\n{displayed_web_context[:5000] or 'нет данных'}\n\n"
                         f"Вопрос:\n{question[:3000]}"
                     ),
                 },

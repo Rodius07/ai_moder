@@ -8,6 +8,19 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 
 
+SEARCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    )
+}
+SEARCH_ENDPOINTS = (
+    "https://html.duckduckgo.com/html/",
+    "https://lite.duckduckgo.com/lite/",
+)
+
+
 @dataclass(frozen=True)
 class SearchResult:
     title: str
@@ -54,13 +67,13 @@ class DuckDuckGoHtmlParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = {key: value or "" for key, value in attrs}
         classes = set(attr_map.get("class", "").split())
-        if tag == "a" and "result__a" in classes:
+        if tag == "a" and ("result__a" in classes or "result-link" in classes):
             self._flush_current()
             self._in_title = True
             self._current_title = []
             self._current_snippet = []
             self._current_url = clean_duckduckgo_url(attr_map.get("href", ""))
-        elif "result__snippet" in classes:
+        elif "result__snippet" in classes or "result-snippet" in classes:
             self._in_snippet = True
 
     def handle_endtag(self, tag: str) -> None:
@@ -96,29 +109,18 @@ async def search_web(query: str, limit: int = 4) -> list[SearchResult]:
     async with httpx.AsyncClient(
         timeout=8,
         follow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 tg-guard-bot/0.1"},
+        headers=SEARCH_HEADERS,
     ) as client:
-        response = await client.get("https://duckduckgo.com/html/", params={"q": query})
-        response.raise_for_status()
-
-    parser = DuckDuckGoHtmlParser()
-    parser.feed(response.text)
-    parser.close()
-    return parser.results[:limit]
+        return await fetch_search_results(client, query, limit)
 
 
 async def search_web_deep(query: str, limit: int = 4, excerpt_chars: int = 1800) -> list[SearchResult]:
     async with httpx.AsyncClient(
         timeout=10,
         follow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 tg-guard-bot/0.1"},
+        headers=SEARCH_HEADERS,
     ) as client:
-        response = await client.get("https://duckduckgo.com/html/", params={"q": query})
-        response.raise_for_status()
-        parser = DuckDuckGoHtmlParser()
-        parser.feed(response.text)
-        parser.close()
-        results = parser.results[:limit]
+        results = await fetch_search_results(client, query, limit)
 
         enriched: list[SearchResult] = []
         for result in results:
@@ -137,6 +139,29 @@ async def search_web_deep(query: str, limit: int = 4, excerpt_chars: int = 1800)
                 )
             )
         return enriched
+
+
+async def fetch_search_results(
+    client: httpx.AsyncClient,
+    query: str,
+    limit: int,
+) -> list[SearchResult]:
+    seen: set[str] = set()
+    merged: list[SearchResult] = []
+    for endpoint in SEARCH_ENDPOINTS:
+        response = await client.get(endpoint, params={"q": query})
+        response.raise_for_status()
+        parser = DuckDuckGoHtmlParser()
+        parser.feed(response.text)
+        parser.close()
+        for result in parser.results:
+            if result.url in seen:
+                continue
+            seen.add(result.url)
+            merged.append(result)
+            if len(merged) >= limit:
+                return merged
+    return merged
 
 
 async def fetch_page_excerpt(client: httpx.AsyncClient, url: str, limit: int) -> str:
