@@ -383,7 +383,7 @@ def render_donation_message(settings: Settings, balance: float | None = None) ->
     lines = [
         "*Сбор на жизнь бота*",
         "",
-        "Если бот хоть раз спас братство от бетонного напряжения, можно докинуть топлива:",
+        "Если бот хоть раз спас братство от лишнего напряжения, можно докинуть топлива:",
         "",
     ]
     if balance is not None:
@@ -1131,6 +1131,46 @@ async def ass_poll(callback: CallbackQuery, store: BotStore) -> None:
     await callback.answer(ASS_POLL_ANSWERS.get(value, "Записал состояние братского прибора."))
 
 
+@router.callback_query(F.data.startswith("setok:"))
+async def confirm_setting_change(callback: CallbackQuery, store: BotStore) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    _, action_id = callback.data.split(":", 1)
+    action = store.pop_pending_setting_action(action_id)
+    if not action:
+        await callback.answer("Заявка уже неактуальна", show_alert=True)
+        return
+    if action.created_by != callback.from_user.id:
+        await callback.answer("Подтвердить может только тот, кто попросил настройку", show_alert=True)
+        return
+
+    try:
+        runtime = apply_pending_setting_action(store, action.chat_id, action.name, action.value)
+    except ValueError:
+        await callback.answer("Не получилось применить настройку", show_alert=True)
+        return
+
+    if callback.message:
+        with suppress(TelegramBadRequest, TelegramForbiddenError):
+            await callback.message.edit_text(
+                render_setting_applied(action.name, action.value, runtime),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+    await callback.answer("Настройка применена")
+
+
+@router.callback_query(F.data.startswith("setno:"))
+async def reject_setting_change(callback: CallbackQuery, store: BotStore) -> None:
+    if not callback.data:
+        return
+    _, action_id = callback.data.split(":", 1)
+    store.pop_pending_setting_action(action_id)
+    if callback.message:
+        with suppress(TelegramBadRequest, TelegramForbiddenError):
+            await callback.message.edit_text("Ок, настройку не меняю.")
+    await callback.answer("Отклонено")
+
+
 async def try_delete(message: Message) -> None:
     try:
         await message.delete()
@@ -1363,6 +1403,9 @@ def settings_help(runtime) -> str:
         `/settings interject 0` - выключить влезания мощной модели
         `/settings interject 1` - включить влезания мощной модели
 
+        Если попросить бота поменять настройку обычным сообщением, он только покажет
+        предложение с кнопками подтверждения/отклонения.
+
         Опечатки `/sintings` и `/sitings` тоже понимаю. Я не гордый.
         """
     ).strip()
@@ -1593,9 +1636,32 @@ async def maybe_handle_bot_addressed_message(
         return False
 
     runtime = store.settings_for(message.chat.id)
-    settings_reply = apply_natural_setting_request(message.chat.id, text, store)
-    if settings_reply:
-        await safe_reply_markdown(message, settings_reply)
+    proposal = propose_natural_setting_request(text)
+    if proposal and message.from_user:
+        action_id = store.create_pending_setting_action(
+            message.chat.id,
+            proposal[0],
+            proposal[1],
+            message.from_user.id,
+        )
+        await message.reply(
+            render_setting_proposal(proposal[0], proposal[1]),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Подтвердить",
+                            callback_data=f"setok:{action_id}",
+                        ),
+                        InlineKeyboardButton(
+                            text="Отклонить",
+                            callback_data=f"setno:{action_id}",
+                        ),
+                    ]
+                ]
+            ),
+        )
         return True
 
     if not looks_like_bot_question(message, bot, text):
@@ -1656,54 +1722,60 @@ def looks_like_bot_question(message: Message, bot: Bot, text: str) -> bool:
     )
 
 
-def apply_natural_setting_request(chat_id: int, text: str, store: BotStore) -> str | None:
+def propose_natural_setting_request(text: str) -> tuple[str, str] | None:
     normalized = text.casefold()
-    model_id = extract_model_id(text)
-    try:
-        if model_id:
-            if any(marker in normalized for marker in ("маленьк", "дешев", "модерац", "modmodel")):
-                runtime = store.update_text_setting(chat_id, "moderation_model", model_id)
-                return f"Поставил дешевую модель модерации: `{runtime.moderation_model}`"
-            if any(marker in normalized for marker in ("картин", "image", "img")):
-                runtime = store.update_text_setting(chat_id, "image_model", model_id)
-                return f"Поставил модель картинок: `{runtime.image_model}`"
-            if any(marker in normalized for marker in ("видео", "video", "vid")):
-                runtime = store.update_text_setting(chat_id, "video_model", model_id)
-                return f"Поставил модель видео: `{runtime.video_model}`"
-            if any(marker in normalized for marker in ("модель", "model", "мощн", "больш")):
-                runtime = store.update_text_setting(chat_id, "ai_model", model_id)
-                return f"Поставил мощную модель для `/ask`, `/report`, `/appeal`: `{runtime.ai_model}`"
-
-        number = extract_setting_number(normalized)
-        if number is not None:
-            if "ask" in normalized or "аск" in normalized:
-                runtime = store.update_setting(chat_id, "ask_context", number)
-                return f"Контекст `/ask` теперь `{runtime.ask_context_limit}` сообщений."
-            if "модерац" in normalized or "провер" in normalized:
-                runtime = store.update_setting(chat_id, "moderation_context", number)
-                return f"Контекст модерации теперь `{runtime.moderation_context_limit}` сообщений."
-            if "молч" in normalized:
-                runtime = store.update_setting(chat_id, "silent_hours", number)
-                return f"Авто-поддержка молчащих теперь через `{runtime.silent_support_hours}` часов."
-
-        toggle_value = extract_toggle_value(normalized)
-        if toggle_value is not None:
-            if any(marker in normalized for marker in ("влез", "подшуч", "вмеш", "интервен", "interject")):
-                runtime = store.update_setting(chat_id, "creative_interjections", toggle_value)
-                state = "включены" if runtime.creative_interjections_enabled else "выключены"
-                return f"Самовольные творческие влезания теперь {state}."
-            if "анти" in normalized and "душ" in normalized:
-                runtime = store.update_setting(chat_id, "anti_bore", toggle_value)
-                state = "включен" if runtime.anti_bore_enabled else "выключен"
-                return f"Анти-душнила теперь {state}."
-
-        web_mode = extract_web_mode(normalized)
-        if web_mode:
-            runtime = store.update_text_setting(chat_id, "ask_web_mode", web_mode)
-            return f"Web-поиск `/ask` теперь `{runtime.ask_web_mode}`."
-    except ValueError:
+    if not any(word in normalized for word in ("поставь", "измени", "включи", "выключи", "переключи")):
         return None
+
+    model_id = extract_model_id(text)
+    if model_id:
+        if any(marker in normalized for marker in ("маленьк", "дешев", "модерац", "modmodel")):
+            return "moderation_model", model_id
+        if any(marker in normalized for marker in ("картин", "image", "img")):
+            return "image_model", model_id
+        if any(marker in normalized for marker in ("видео", "video", "vid")):
+            return "video_model", model_id
+        if any(marker in normalized for marker in ("модель", "model", "мощн", "больш")):
+            return "ai_model", model_id
+
+    number = extract_setting_number(normalized)
+    if number is not None:
+        if "ask" in normalized or "аск" in normalized:
+            return "ask_context", str(number)
+        if "модерац" in normalized or "провер" in normalized:
+            return "moderation_context", str(number)
+        if "молч" in normalized:
+            return "silent_hours", str(number)
+
+    toggle_value = extract_toggle_value(normalized)
+    if toggle_value is not None:
+        if any(marker in normalized for marker in ("влез", "подшуч", "вмеш", "интервен", "interject")):
+            return "creative_interjections", str(toggle_value)
+        if "анти" in normalized and "душ" in normalized:
+            return "anti_bore", str(toggle_value)
+
+    web_mode = extract_web_mode(normalized)
+    if web_mode:
+        return "ask_web_mode", web_mode
     return None
+
+
+def render_setting_proposal(name: str, value: str) -> str:
+    return (
+        "*Подтвердить изменение настройки?*\n"
+        f"Параметр: `{name}`\n"
+        f"Новое значение: `{md_escape(value)}`"
+    )
+
+
+def apply_pending_setting_action(store: BotStore, chat_id: int, name: str, value: str):
+    if name in {"ask_context", "moderation_context", "silent_hours", "creative_interjections", "anti_bore"}:
+        return store.update_setting(chat_id, name, int(value))
+    return store.update_text_setting(chat_id, name, value)
+
+
+def render_setting_applied(name: str, value: str, runtime) -> str:
+    return f"*Настройка применена.*\n`{name}` = `{md_escape(value)}`"
 
 
 def extract_model_id(text: str) -> str | None:
@@ -1759,7 +1831,8 @@ async def maybe_send_creative_interjection(
     try:
         answer = await ai_moderator.answer(
             "Влезь в разговор одним коротким сообщением в тему: дружески подшути, "
-            "поддержи вайб, не душни и не оскорбляй реально. 1-2 предложения максимум.",
+            "поддержи вайб, не душни, не оскорбляй реально и не повторяй старые дежурные мемы. "
+            "1-2 предложения максимум.",
             context,
             "Moder",
             "",
@@ -1847,7 +1920,7 @@ def ass_poll_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Терпимо", callback_data="ass:ok"),
             ],
             [
-                InlineKeyboardButton(text="Бетон", callback_data="ass:concrete"),
+                InlineKeyboardButton(text="Зажато", callback_data="ass:concrete"),
                 InlineKeyboardButton(text="Я шкаф", callback_data="ass:cabinet"),
             ],
         ]
@@ -1889,7 +1962,7 @@ def render_weekly_digest(chat_id: int, store: BotStore) -> str:
     if lines[-1] == "*Респект недели*":
         lines.append("- пока никто не нажал /support, братский потенциал простаивает")
     lines.append("")
-    lines.append("Итог: меньше бетона, больше слов через рот. Продолжаем движение к разжатости.")
+    lines.append("Итог: меньше зажимов, больше слов через рот. Продолжаем движение к разжатости.")
     return "\n".join(lines)
 
 
@@ -2048,7 +2121,7 @@ def md_escape(value: str) -> str:
 
 
 SUPPORT_MESSAGES = [
-    "*{supporter} {action} {target}.*\nРеспект в копилку: `{count}`. Братский каркас укреплен.",
+    "*{supporter} {action} {target}.*\nРеспект в копилку: `{count}`. Братский вайб укреплен.",
     "*{supporter} {action} {target}.*\nСчетчик поддержки: `{count}`. Так и строится нормальная психика.",
     "*{supporter} {action} {target}.*\nПоддержек всего: `{count}`. Очко стало на миллиметр свободнее.",
 ]
@@ -2137,15 +2210,15 @@ SUPPORT_KEYWORDS = [
 
 VIOLATION_MESSAGES = [
     "Брат, тут очко чата слегка сжалось. Мысль можно оставить, наезд лучше выдохнуть.",
-    "Стоп-кран братства. Формулировка пошла в бетон, а мы идем к разжатости.",
+    "Стоп-кран братства. Формулировка пошла жестковато, а мы идем к разжатости.",
     "Братский свисток: рофл рофлом, но это уже цепляет человека, а не ситуацию.",
     "Сообщение ушло на разминку к внутреннему терминатору. Давай вернем человеческую версию.",
-    "Внутренний бетон заскрипел. Переформулируй так, чтобы брат остался братом.",
+    "Внутренний стоп-кран щелкнул. Переформулируй так, чтобы брат остался братом.",
     "Осторожно, словесная штанга пошла не на мышцы, а по человеку. Снимаем вес.",
     "Братский барометр показал зажим. Тут лучше докинуть воздуха, а не давления.",
     "Фраза свернула с рофла на кочку. Возвращаемся на дорогу нормального человека.",
     "Чат чуть присел от напряжения. Давай без удара по своим.",
-    "Комиссия по разжатости просит версию без бетонной арматуры.",
+    "Комиссия по разжатости просит версию помягче и без наезда.",
     "Слишком много нажима, мало братства. Перекинь мысль мягче.",
     "Тут не терминаторская арена, а братский чат. Выдыхаем и говорим словами через рот.",
 ]
@@ -2154,22 +2227,22 @@ VIOLATION_MESSAGES = [
 ANTI_BORE_MESSAGES = [
     "*Анти-душнила режим включился сам.*\nБратья, кажется, мы уже не ищем истину, а шлифуем лбами одну и ту же стену. Можно по одному главному аргументу и выдох.",
     "*Стоп, научный совет гаража.*\nСпор разгоняется, а разжатость отстает. Давайте короче: что каждый хочет на самом деле доказать?",
-    "*Детектор бетонного диспута пищит.*\nЕсли это уже не разговор, а турнир по удержанию позиции, предлагаю паузу на воду и человеческую формулировку.",
+    "*Детектор затяжного диспута пищит.*\nЕсли это уже не разговор, а турнир по удержанию позиции, предлагаю паузу на воду и человеческую формулировку.",
 ]
 
 
 ASS_POLL_LABELS = {
     "open": "разжато",
     "ok": "терпимо",
-    "concrete": "бетон",
+    "concrete": "зажато",
     "cabinet": "я шкаф",
 }
 
 
 ASS_POLL_ANSWERS = {
     "open": "Записал: разжато. Братство довольно кивает.",
-    "ok": "Записал: терпимо. Уже не бетон, уже жизнь.",
-    "concrete": "Записал: бетон. Несем внутренний перфоратор поддержки.",
+    "ok": "Записал: терпимо. Уже легче, уже жизнь.",
+    "concrete": "Записал: зажато. Несем внутреннюю поддержку.",
     "cabinet": "Записал: я шкаф. Уважаем, но проветрим.",
 }
 
@@ -2185,6 +2258,6 @@ MORNING_MESSAGES = [
 EVENING_MESSAGES = [
     "*Вечерний чек братства.*\nКак вы, мужики? Кто вывез день, кто притворился шкафом, кто хочет просто молча получить плюсик поддержки?",
     "*Братский вечерний обход.*\nДень почти закрыт. Что внутри: норм, шумно, зажато, победно? Можно одним словом, можно простыней, можно честно.",
-    "*Как дела у братиков?*\nЕсли день был тяжелый, не надо героически цементироваться. Тут можно сказать: `меня поджарило`, и это уже нормальный шаг.",
-    "*Контроль разжатости на вечер.*\nКто сегодня стал на 1% спокойнее? Кто наоборот собрал внутренний бетонный завод? Докладывайте по желанию.",
+    "*Как дела у братиков?*\nЕсли день был тяжелый, не надо изображать терминатора. Тут можно сказать: `меня поджарило`, и это уже нормальный шаг.",
+    "*Контроль разжатости на вечер.*\nКто сегодня стал на 1% спокойнее? Кто наоборот поднакопил внутреннего напряжения? Докладывайте по желанию.",
 ]

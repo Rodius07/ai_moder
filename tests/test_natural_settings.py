@@ -1,25 +1,25 @@
 from types import SimpleNamespace
 
-from tg_guard_bot.bot import apply_natural_setting_request, render_donation_message
+from tg_guard_bot.bot import (
+    apply_pending_setting_action,
+    propose_natural_setting_request,
+    render_donation_message,
+)
 from tg_guard_bot.store import BotStore
 
 
-def test_natural_setting_changes_ask_context(tmp_path) -> None:
+def test_natural_setting_request_only_proposes_change() -> None:
+    proposal = propose_natural_setting_request("модер поставь контекст ask 25 сообщений")
+
+    assert proposal == ("ask_context", "25")
+
+
+def test_pending_setting_action_applies_after_confirmation(tmp_path) -> None:
     store = BotStore(str(tmp_path / "state.json"))
 
-    reply = apply_natural_setting_request(1, "модер поставь контекст ask 25 сообщений", store)
+    runtime = apply_pending_setting_action(store, 1, "creative_interjections", "0")
 
-    assert reply
-    assert store.settings_for(1).ask_context_limit == 25
-
-
-def test_natural_setting_toggles_interjections(tmp_path) -> None:
-    store = BotStore(str(tmp_path / "state.json"))
-
-    reply = apply_natural_setting_request(1, "бот выключи влезания", store)
-
-    assert reply
-    assert store.settings_for(1).creative_interjections_enabled is False
+    assert runtime.creative_interjections_enabled is False
 
 
 def test_render_donation_message_includes_balance() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -20,7 +21,7 @@ class ChatRuntimeSettings:
     video_model: str | None = None
     silent_support_hours: int = 72
     anti_bore_enabled: bool = True
-    creative_interjections_enabled: bool = True
+    creative_interjections_enabled: bool = False
     last_creative_interjection_at: str | None = None
     last_daily_stats_date: str | None = None
     last_morning_message_date: str | None = None
@@ -63,6 +64,15 @@ class ModerationCase:
     resolved: bool = False
 
 
+@dataclass
+class PendingSettingAction:
+    chat_id: int
+    name: str
+    value: str
+    created_by: int
+    created_at: str = ""
+
+
 class BotStore:
     def __init__(self, path: str) -> None:
         self.path = Path(path)
@@ -71,6 +81,7 @@ class BotStore:
         self.chat_history: dict[str, list[StoredChatMessage]] = {}
         self.ass_votes: dict[str, dict[str, dict[str, str]]] = {}
         self.moderation_cases: dict[str, dict[str, ModerationCase]] = {}
+        self.pending_setting_actions: dict[str, PendingSettingAction] = {}
         self.load()
 
     def load(self) -> None:
@@ -99,6 +110,10 @@ class BotStore:
             }
             for chat_id, cases in payload.get("moderation_cases", {}).items()
         }
+        self.pending_setting_actions = {
+            action_id: PendingSettingAction(**action)
+            for action_id, action in payload.get("pending_setting_actions", {}).items()
+        }
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +133,10 @@ class BotStore:
             "moderation_cases": {
                 chat_id: {message_id: asdict(case) for message_id, case in cases.items()}
                 for chat_id, cases in self.moderation_cases.items()
+            },
+            "pending_setting_actions": {
+                action_id: asdict(action)
+                for action_id, action in self.pending_setting_actions.items()
             },
         }
         temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -173,6 +192,30 @@ class BotStore:
             raise ValueError(f"Unknown setting: {name}")
         self.save()
         return settings
+
+    def create_pending_setting_action(
+        self,
+        chat_id: int,
+        name: str,
+        value: str,
+        created_by: int,
+    ) -> str:
+        action_id = uuid.uuid4().hex[:12]
+        self.pending_setting_actions[action_id] = PendingSettingAction(
+            chat_id=chat_id,
+            name=name,
+            value=value,
+            created_by=created_by,
+            created_at=now_iso(),
+        )
+        self.save()
+        return action_id
+
+    def pop_pending_setting_action(self, action_id: str) -> PendingSettingAction | None:
+        action = self.pending_setting_actions.pop(action_id, None)
+        if action:
+            self.save()
+        return action
 
     def touch_user(self, chat_id: int, user_id: int, user_name: str) -> None:
         stats = self.user_for(chat_id, user_id)
