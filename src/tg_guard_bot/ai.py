@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 from openai import AsyncOpenAI
@@ -277,20 +278,27 @@ class AiModerator:
         context: str,
         author: str = "",
         model: str | None = None,
-    ) -> str:
+    ) -> tuple[str, ModerationResult]:
         response = await self.client.chat.completions.create(
             model=model or self.model,
-            temperature=0.2,
+            temperature=0.1,
+            response_format={"type": "json_object"},
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "Ты рассматриваешь донос/жалобу в братском Telegram-чате. "
-                        "Смотри на сообщение и 30 сообщений контекста. Если нарушение есть, "
-                        "начни с 'Страйк уместен.' и объясни, что именно не ок. Если нарушения "
-                        "нет, начни с 'Страйк не нужен.' и объясни, почему это допустимо в "
-                        "контексте чата. Учитывай внутренний язык: 'очко' и 'очки' не являются "
-                        "автоматически сексуальным оскорблением."
+                        "Смотри на сообщение и 30 сообщений контекста. Большая модель сразу "
+                        "выносит финальный вердикт, без дополнительной маленькой модели. "
+                        "Мат сам по себе допустим. Нарушение есть только если это персональная "
+                        "травля, унижение, угроза или явная атака на участника с учетом контекста. "
+                        "Учитывай внутренний язык: 'очко' и 'очки' не являются автоматически "
+                        "сексуальным оскорблением. Не предлагай банить или удалять людей. "
+                        "Ответь строго JSON: "
+                        "{\"is_violation\": boolean, \"confidence\": number, "
+                        "\"reasons\": [\"короткая причина\"], \"explanation\": \"текст для чата\"}. "
+                        "Если нарушение есть, explanation начни с 'Страйк уместен.'. "
+                        "Если нарушения нет, explanation начни с 'Страйк не нужен.'."
                     ),
                 },
                 {"role": "system", "content": f"Правила конкретного чата:\n{self.chat_rules}"},
@@ -304,7 +312,45 @@ class AiModerator:
                 },
             ],
         )
-        return (response.choices[0].message.content or "").strip()
+        raw = response.choices[0].message.content or "{}"
+        return parse_report_json(raw)
+
+
+def parse_report_json(raw: str) -> tuple[str, ModerationResult]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        text = raw.strip()
+        is_violation = text.casefold().startswith("страйк уместен")
+        return (
+            text or "Страйк не нужен. ИИ не смог нормально оформить разбор.",
+            ModerationResult(
+                verdict=Verdict.REVIEW if is_violation else Verdict.ALLOW,
+                confidence=0.8 if is_violation else 1.0,
+                reasons=["разбор большой модели"],
+            ),
+        )
+
+    explanation = str(payload.get("explanation") or "").strip()
+    is_violation = bool(payload.get("is_violation"))
+    confidence = float(payload.get("confidence") or (0.85 if is_violation else 1.0))
+    reasons = payload.get("reasons") or ["разбор большой модели"]
+    if not isinstance(reasons, list):
+        reasons = [str(reasons)]
+    if not explanation:
+        explanation = "Страйк уместен." if is_violation else "Страйк не нужен."
+    if is_violation and not re.match(r"^\s*страйк уместен", explanation, re.I):
+        explanation = "Страйк уместен. " + explanation
+    if not is_violation and not re.match(r"^\s*страйк не нужен", explanation, re.I):
+        explanation = "Страйк не нужен. " + explanation
+    return (
+        explanation,
+        ModerationResult(
+            verdict=Verdict.REVIEW if is_violation else Verdict.ALLOW,
+            confidence=max(0.0, min(1.0, confidence)),
+            reasons=[str(reason) for reason in reasons],
+        ),
+    )
 
 
 def parse_moderation_json(raw: str) -> ModerationResult:

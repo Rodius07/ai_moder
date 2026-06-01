@@ -536,18 +536,12 @@ async def report(
             else "unknown"
         )
         runtime = store.settings_for(message.chat.id)
-        explanation = await ai_moderator.report(
+        explanation, moderation_result = await ai_moderator.report(
             text,
             context,
             author,
             creative_model_for(runtime, settings),
         )
-        moderation_result = await ai_moderator.moderate(
-            text,
-            format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30))),
-            moderation_model_for(runtime, settings),
-        )
-        moderation_result = soften_uncertain_ai_delete(moderation_result)
     except Exception:
         logger.exception("report failed chat=%s message=%s", message.chat.id, disputed.message_id)
         await thinking.edit_text("Донос не обработался. Братская канцелярия временно в дыму.")
