@@ -1673,7 +1673,9 @@ async def send_arsen_voice(
     if not tts:
         await edit_text_markdown(thinking, "Голос Арсена не настроен: нужен ELEVENLABS_API_KEY и ELEVENLABS_VOICE_ID.")
         return
-    await thinking.edit_text("Записываю голосом...")
+    if (thinking.text or "") != "Записываю голосом...":
+        with suppress(TelegramBadRequest):
+            await thinking.edit_text("Записываю голосом...")
     try:
         audio = await tts.synthesize_voice(answer)
     except Exception:
