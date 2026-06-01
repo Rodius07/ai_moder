@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     openrouter_video_aspect_ratio: str = Field("16:9", alias="OPENROUTER_VIDEO_ASPECT_RATIO")
     openrouter_video_duration: int = Field(5, alias="OPENROUTER_VIDEO_DURATION")
     openrouter_video_resolution: str = Field("720p", alias="OPENROUTER_VIDEO_RESOLUTION")
+    web_search_model: str = Field(
+        "openai/gpt-4o-search-preview",
+        alias="WEB_SEARCH_MODEL",
+    )
+    elevenlabs_api_key: str | None = Field(None, alias="ELEVENLABS_API_KEY")
+    elevenlabs_voice_id: str | None = Field(None, alias="ELEVENLABS_VOICE_ID")
+    elevenlabs_model_id: str = Field("eleven_multilingual_v2", alias="ELEVENLABS_MODEL_ID")
     chat_rules_path: str | None = Field("chat_rules.md", alias="CHAT_RULES_PATH")
     data_path: str = Field("data/bot_state.json", alias="DATA_PATH")
     donation_ton_address: str | None = Field(None, alias="DONATION_TON_ADDRESS")
@@ -63,6 +70,8 @@ class Settings(BaseSettings):
         "openai_base_url",
         "openrouter_site_url",
         "openrouter_app_name",
+        "elevenlabs_api_key",
+        "elevenlabs_voice_id",
         "chat_rules_path",
         "donation_ton_address",
         "donation_usdt_address",

@@ -32,8 +32,8 @@ from tg_guard_bot.rules import RuleConfig, RuleEngine
 from tg_guard_bot.state import WarningStore
 from tg_guard_bot.store import BotStore, ModerationCase, StoredChatMessage, UserStats
 from tg_guard_bot.transcription import LocalTranscriber, transcribe_message_media
+from tg_guard_bot.tts import ElevenLabsTTS
 from tg_guard_bot.video_generation import VideoGenerationError, VideoGenerator
-from tg_guard_bot.web_search import format_search_results, search_web_deep
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -74,6 +74,15 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         if settings.enable_local_transcription
         else None
     )
+    tts = (
+        ElevenLabsTTS(
+            api_key=settings.elevenlabs_api_key,
+            voice_id=settings.elevenlabs_voice_id,
+            model_id=settings.elevenlabs_model_id,
+        )
+        if settings.elevenlabs_api_key and settings.elevenlabs_voice_id
+        else None
+    )
     image_generator = (
         ImageGenerator(
             api_key=settings.openai_api_key,
@@ -108,6 +117,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         history=history,
         store=store,
         transcriber=transcriber,
+        tts=tts,
         image_generator=image_generator,
         video_generator=video_generator,
     )
@@ -124,6 +134,7 @@ async def on_startup(bot: Bot, store: BotStore, settings: Settings) -> None:
             BotCommand(command="stats", description="статистика нарушений и разжатость"),
             BotCommand(command="support", description="поддержать брата ответом на сообщение"),
             BotCommand(command="ask", description="задать вопрос ИИ с контекстом чата"),
+            BotCommand(command="transcribe", description="расшифровать голосовое/кружочек"),
             BotCommand(command="image", description="сгенерировать картинку через OpenRouter"),
             BotCommand(command="video", description="сгенерировать видео через OpenRouter"),
             BotCommand(command="appeal", description="апелляция по спорному сообщению"),
@@ -156,7 +167,7 @@ async def start(message: Message) -> None:
     await message.answer(
         "*Я на посту братства.*\n"
         "Проверяю чат, слушаю голосовые, помню контекст и иногда мягко хлопаю по плечу.\n\n"
-        "Команды: /settings, /stats, /rules, /ask, /image, /video, /appeal, /report, /donate",
+        "Команды: /settings, /stats, /rules, /ask, /transcribe, /image, /video, /appeal, /report, /donate",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -178,7 +189,7 @@ async def rules(message: Message, settings: Settings, store: BotStore) -> None:
         f"- модель /ask, /report, /appeal: `{creative_model_for(runtime, settings)}`\n"
         f"- модель картинок: `{runtime.image_model or settings.openrouter_image_model}`\n"
         f"- модель видео: `{runtime.video_model or settings.openrouter_video_model}`\n"
-        f"- web-поиск /ask: `{runtime.ask_web_mode}`\n"
+        f"- web-поиск /ask: `{settings.web_search_model}`\n"
         f"- влезания мощной модели: `{'включены' if runtime.creative_interjections_enabled else 'выключены'}`\n"
         f"- авто-поддержка молчащих: `{runtime.silent_support_hours}` часов\n"
         f"- речь в аудио/видео: `{'включена' if settings.enable_local_transcription else 'выключена'}`\n"
@@ -205,6 +216,7 @@ async def ask(
     ai_moderator: AiModerator | None,
     history: MessageHistory,
     store: BotStore,
+    tts: ElevenLabsTTS | None,
 ) -> None:
     question = (command.args or "").strip()
     if not question:
@@ -228,54 +240,36 @@ async def ask(
             context[:500].replace("\n", " | "),
         )
         asker = f"{message.from_user.full_name} ({message.from_user.id})" if message.from_user else ""
-        web_context = ""
-        use_openrouter_web = should_use_openrouter_web(runtime.ask_web_mode, question, ai_moderator)
-        use_local_web = should_use_local_web(runtime.ask_web_mode, question, ai_moderator)
-        logger.info(
-            "ask web decision chat=%s mode=%s local=%s openrouter=%s query=%r",
-            message.chat.id,
-            runtime.ask_web_mode,
-            use_local_web,
-            use_openrouter_web,
-            question[:120],
-        )
-        if use_local_web:
-            try:
-                search_query = web_search_query(question, context_messages)
-                web_results = await search_web_deep(search_query, runtime.ask_web_results)
-                web_context = format_search_results(web_results)
-                logger.info(
-                    "ask local web search chat=%s results=%s query=%r",
-                    message.chat.id,
-                    len(web_results),
-                    search_query[:120],
-                )
-            except Exception:
-                logger.exception("ask web search failed chat=%s query=%r", message.chat.id, question)
-        elif use_openrouter_web:
-            logger.info(
-                "ask openrouter web tool enabled chat=%s mode=%s query=%r",
-                message.chat.id,
-                runtime.ask_web_mode,
-                question[:120],
-            )
         current_time = datetime.now(ZoneInfo("Europe/Moscow")).strftime(
             "%Y-%m-%d %H:%M:%S MSK, %A"
         )
-        answer = await ai_moderator.answer(
+        web_context = await search_preview_context(
+            ai_moderator,
+            settings,
+            runtime,
             question,
+            context_messages,
+            context,
+            asker,
+            current_time,
+        )
+        arsen_question = extract_arsen_question(question)
+        answer = await ai_moderator.answer(
+            arsen_question or question,
             context,
             asker,
             web_context,
             current_time,
             creative_model_for(runtime, settings),
-            use_openrouter_web,
-            runtime.ask_web_results,
         )
     except Exception:
+        logger.exception("ask failed chat=%s", message.chat.id)
         await thinking.edit_text("Не получилось получить ответ ИИ. Попробуйте позже.")
         return
-    await edit_text_markdown(thinking, answer[:3900])
+    if arsen_question is not None:
+        await send_arsen_voice(message, thinking, answer, tts)
+    else:
+        await edit_text_markdown(thinking, answer[:3900])
     record_ask_exchange(message, bot, store, question, answer)
 
 
@@ -434,15 +428,17 @@ async def openrouter_balance(settings: Settings) -> float | None:
         return None
 
 
-@router.message(Command("appeal", "apell"))
+@router.message(Command("appeal", "apell", "apeal"))
 async def appeal(
     message: Message,
+    command: CommandObject,
     bot: Bot,
     settings: Settings,
     ai_moderator: AiModerator | None,
     warnings: WarningStore,
     store: BotStore,
     transcriber: LocalTranscriber | None,
+    tts: ElevenLabsTTS | None,
 ) -> None:
     if not ai_moderator:
         await message.answer("Апелляции через ИИ пока выключены: не задан OPENAI_API_KEY.")
@@ -479,7 +475,13 @@ async def appeal(
         context = format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30)))
         author = f"{case.user_name} ({case.user_id})"
         runtime = store.settings_for(message.chat.id)
-        answer = await ai_moderator.appeal(text, context, author, creative_model_for(runtime, settings))
+        answer = await ai_moderator.appeal(
+            text,
+            context,
+            author,
+            creative_model_for(runtime, settings),
+            (command.args or "").strip(),
+        )
     except Exception:
         logger.exception("appeal failed chat=%s message=%s", message.chat.id, disputed.message_id)
         await thinking.edit_text("Не получилось пересмотреть. ИИ сейчас присел на корточки.")
@@ -622,6 +624,35 @@ async def stats(message: Message, store: BotStore) -> None:
     await message.answer(render_stats(message.chat.id, store), parse_mode=ParseMode.MARKDOWN)
 
 
+@router.message(Command("transcribe", "text", "stt"))
+async def transcribe_command(
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    transcriber: LocalTranscriber | None,
+) -> None:
+    if not transcriber:
+        await message.answer("Локальная расшифровка выключена.")
+        return
+    if not message.reply_to_message:
+        await message.answer(
+            "Ответь `/transcribe` на голосовое, кружочек, аудио или видео.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    thinking = await message.answer("Слушаю и расшифровываю...")
+    try:
+        text = await appeal_message_text(message.reply_to_message, bot, settings, transcriber)
+    except Exception:
+        logger.exception("manual transcription failed chat=%s", message.chat.id)
+        await thinking.edit_text("Не получилось расшифровать.")
+        return
+    if not text:
+        await thinking.edit_text("Не нашел речи в этом сообщении.")
+        return
+    await edit_text_markdown(thinking, text[:3900])
+
+
 @router.message(Command("support", "respect"))
 async def support(message: Message, store: BotStore) -> None:
     if not message.from_user:
@@ -701,6 +732,7 @@ async def moderate_group_message(
     history: MessageHistory,
     store: BotStore,
     transcriber: LocalTranscriber | None,
+    tts: ElevenLabsTTS | None,
 ) -> None:
     await process_group_message(
         message,
@@ -712,6 +744,7 @@ async def moderate_group_message(
         history,
         store,
         transcriber,
+        tts,
         is_edit=False,
     )
 
@@ -727,6 +760,7 @@ async def moderate_edited_group_message(
     history: MessageHistory,
     store: BotStore,
     transcriber: LocalTranscriber | None,
+    tts: ElevenLabsTTS | None,
 ) -> None:
     await process_group_message(
         message,
@@ -738,6 +772,7 @@ async def moderate_edited_group_message(
         history,
         store,
         transcriber,
+        tts,
         is_edit=True,
     )
 
@@ -752,6 +787,7 @@ async def process_group_message(
     history: MessageHistory,
     store: BotStore,
     transcriber: LocalTranscriber | None,
+    tts: ElevenLabsTTS | None,
     *,
     is_edit: bool,
 ) -> None:
@@ -815,6 +851,7 @@ async def process_group_message(
             ai_moderator,
             store,
             text,
+            tts,
         ):
             return
     if not is_edit:
@@ -1322,23 +1359,6 @@ def moderation_model_for(runtime, settings: Settings) -> str:
     return runtime.moderation_model or settings.openai_moderation_model or settings.openai_model
 
 
-def should_use_openrouter_web(
-    mode: str,
-    question: str,
-    ai_moderator: AiModerator,
-) -> bool:
-    if not ai_moderator.base_url or "openrouter.ai" not in ai_moderator.base_url:
-        return False
-    return mode == "openrouter" and should_use_web(question)
-
-
-def should_use_local_web(mode: str, question: str, ai_moderator: AiModerator) -> bool:
-    _ = ai_moderator
-    if mode in {"auto", "local"}:
-        return should_use_web(question)
-    return False
-
-
 def should_use_web(question: str) -> bool:
     text = question.casefold()
     no_web_markers = (
@@ -1365,8 +1385,8 @@ def settings_help(runtime) -> str:
         Модель картинок: `{runtime.image_model or 'из .env'}`
         Модель видео: `{runtime.video_model or 'из .env'}`
         Интернет для `/ask`: `{'включен' if runtime.ask_web_enabled else 'выключен'}`
-        Режим web-поиска: `{runtime.ask_web_mode}`
-        Web-результатов для `/ask`: `{runtime.ask_web_results}`
+        Web-поиск `/ask`: `openai/gpt-4o-search-preview`
+        Поисковых проходов для `/ask`: `{runtime.ask_web_results}`
         Авто-поддержка молчащих: `{runtime.silent_support_hours}` часов
         Анти-душнила: `{'включен' if runtime.anti_bore_enabled else 'выключен'}`
         Влезания мощной модели: `{'включены' if runtime.creative_interjections_enabled else 'выключены'}`
@@ -1380,13 +1400,10 @@ def settings_help(runtime) -> str:
         `/settings image google/gemini-2.5-flash-image` - модель картинок OpenRouter
         `/settings image black-forest-labs/flux.2-pro` - пример Flux
         `/settings video x-ai/grok-imagine-video` - модель видео OpenRouter
-        `/settings webmode auto` - локальный поиск DuckDuckGo
-        `/settings webmode openrouter` - всегда OpenRouter `:online`
-        `/settings webmode local` - локальный DuckDuckGo + выдержки страниц
         `/settings webmode off` - интернет полностью выключен
         `/settings web 1` - включить интернет для `/ask`
         `/settings web 0` - выключить интернет для `/ask`
-        `/settings results 4` - сколько web-результатов давать `/ask`
+        `/settings results 4` - сколько поисковых проходов давать `/ask`
         `/settings silent 72` - через сколько часов молчания чекать брата
         `/settings antibore 0` - выключить анти-душнилу
         `/settings antibore 1` - включить анти-душнилу
@@ -1529,6 +1546,72 @@ def should_mix_context_into_search(question: str) -> bool:
     return len(text) <= 80 or any(marker in text for marker in markers)
 
 
+async def search_preview_context(
+    ai_moderator: AiModerator,
+    settings: Settings,
+    runtime,
+    question: str,
+    context_messages: list[ChatMessage],
+    context: str,
+    asker: str,
+    current_time: str,
+) -> str:
+    if not runtime.ask_web_enabled or not should_use_web(question):
+        return ""
+    query = web_search_query(question, context_messages)
+    try:
+        result = await ai_moderator.web_search_context(
+            query,
+            context,
+            asker,
+            current_time,
+            settings.web_search_model,
+            runtime.ask_web_results,
+        )
+        logger.info(
+            "search preview context chat_query=%r chars=%s model=%s",
+            query[:160],
+            len(result),
+            settings.web_search_model,
+        )
+        return result
+    except Exception:
+        logger.exception("search preview failed query=%r", query[:160])
+        return ""
+
+
+def extract_arsen_question(text: str) -> str | None:
+    normalized = text.strip()
+    match = re.match(r"^(?:arsen|арсен|макарон)\b[:,!\\-\\s]*(.*)$", normalized, re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip() or "ответь братским голосом"
+
+
+def is_addressed_to_arsen(text: str) -> bool:
+    return extract_arsen_question(text) is not None
+
+
+async def send_arsen_voice(
+    message: Message,
+    thinking: Message,
+    answer: str,
+    tts: ElevenLabsTTS | None,
+) -> None:
+    if not tts:
+        await edit_text_markdown(thinking, "Голос Арсена не настроен: нужен ELEVENLABS_API_KEY и ELEVENLABS_VOICE_ID.")
+        return
+    await thinking.edit_text("Записываю голосом...")
+    try:
+        audio = await tts.synthesize_voice(answer)
+    except Exception:
+        logger.exception("arsen tts failed chat=%s", message.chat.id)
+        await edit_text_markdown(thinking, answer[:3900])
+        return
+    await thinking.delete()
+    await message.reply_voice(BufferedInputFile(audio, filename="arsen.ogg"))
+
+
 def requested_context_limit(prompt: str, default: int = 0) -> int:
     text = prompt.casefold()
     patterns = (
@@ -1658,8 +1741,10 @@ async def maybe_handle_bot_addressed_message(
     ai_moderator: AiModerator,
     store: BotStore,
     text: str,
+    tts: ElevenLabsTTS | None,
 ) -> bool:
-    if not is_addressed_to_bot(message, bot, text):
+    arsen_question = extract_arsen_question(text)
+    if not arsen_question and not is_addressed_to_bot(message, bot, text):
         return False
     if text.startswith("/"):
         return False
@@ -1693,52 +1778,41 @@ async def maybe_handle_bot_addressed_message(
         )
         return True
 
-    if not looks_like_bot_question(message, bot, text):
+    if not arsen_question and not looks_like_bot_question(message, bot, text):
         return False
 
     context_messages = stored_to_chat_messages(store.latest_messages(message.chat.id, runtime.ask_context_limit))
     context = format_context(context_messages)
     asker = f"{message.from_user.full_name} ({message.from_user.id})" if message.from_user else ""
     current_time = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S MSK, %A")
-    use_openrouter_web = should_use_openrouter_web(runtime.ask_web_mode, text, ai_moderator)
-    use_local_web = should_use_local_web(runtime.ask_web_mode, text, ai_moderator)
-    web_context = ""
-    logger.info(
-        "implicit answer web decision chat=%s mode=%s local=%s openrouter=%s query=%r",
-        message.chat.id,
-        runtime.ask_web_mode,
-        use_local_web,
-        use_openrouter_web,
-        text[:120],
+    question = arsen_question or text
+    web_context = await search_preview_context(
+        ai_moderator,
+        settings,
+        runtime,
+        question,
+        context_messages,
+        context,
+        asker,
+        current_time,
     )
-    if use_local_web:
-        try:
-            search_query = web_search_query(text, context_messages)
-            web_results = await search_web_deep(search_query, runtime.ask_web_results)
-            web_context = format_search_results(web_results)
-            logger.info(
-                "implicit answer local web search chat=%s results=%s query=%r",
-                message.chat.id,
-                len(web_results),
-                search_query[:120],
-            )
-        except Exception:
-            logger.exception("implicit answer web search failed chat=%s query=%r", message.chat.id, text)
     try:
         answer = await ai_moderator.answer(
-            text,
+            question,
             context,
             asker,
             web_context,
             current_time,
             creative_model_for(runtime, settings),
-            use_openrouter_web,
-            runtime.ask_web_results,
         )
     except Exception:
         logger.exception("implicit bot answer failed chat=%s", message.chat.id)
         return False
-    await safe_reply_markdown(message, answer[:3900])
+    if arsen_question:
+        thinking = await message.reply("Записываю голосом...")
+        await send_arsen_voice(message, thinking, answer, tts)
+    else:
+        await safe_reply_markdown(message, answer[:3900])
     record_ask_exchange(message, bot, store, text, answer)
     return True
 
@@ -1855,7 +1929,7 @@ def extract_toggle_value(text: str) -> int | None:
 def extract_web_mode(text: str) -> str | None:
     if "webmode" not in text and "поиск" not in text and "интернет" not in text:
         return None
-    for mode in ("openrouter", "local", "auto", "off"):
+    for mode in ("auto", "off"):
         if mode in text:
             return mode
     if "выключ" in text or "отключ" in text:

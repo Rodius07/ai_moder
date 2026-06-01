@@ -188,12 +188,52 @@ class AiModerator:
         )
         return (response.choices[0].message.content or "").strip()
 
+    async def web_search_context(
+        self,
+        query: str,
+        context: str = "",
+        asker: str = "",
+        current_time: str = "",
+        model: str = "openai/gpt-4o-search-preview",
+        max_searches: int = 4,
+    ) -> str:
+        logger.info("web search request model=%s max_searches=%s query=%r", model, max_searches, query[:160])
+        response = await self.client.chat.completions.create(
+            model=model,
+            temperature=0.1,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты модуль веб-поиска для Telegram-бота. Сделай один или несколько "
+                        "веб-поисков, если это нужно для ответа. Верни только полезный "
+                        "поисковый контекст: найденные факты, короткие выдержки и URL источников. "
+                        "Если ищешь трек, мем, цитату или отсылку, обязательно проверь точное "
+                        "совпадение по строке и укажи наиболее вероятный источник. Не придумывай "
+                        "источники и не делай уверенный вывод без совпадений."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Автор запроса: {asker}\n"
+                        f"Текущая дата и время: {current_time or 'не задано'}\n"
+                        f"Максимум поисковых проходов: {max(1, min(8, max_searches))}\n\n"
+                        f"Контекст чата:\n{context[:5000]}\n\n"
+                        f"Поисковый запрос:\n{query[:1200]}"
+                    ),
+                },
+            ],
+        )
+        return (response.choices[0].message.content or "").strip()
+
     async def appeal(
         self,
         message_text: str,
         context: str,
         author: str = "",
         model: str | None = None,
+        appellant_reason: str = "",
     ) -> str:
         response = await self.client.chat.completions.create(
             model=model or self.model,
@@ -213,6 +253,8 @@ class AiModerator:
                         "'очки' могут быть счетом/баллами. Не сексуализируй эти слова без явной "
                         "сексуальной атаки. Мат и грубый юмор допустимы, если нет унижения "
                         "конкретного участника."
+                        "Если пользователь приложил аргумент апелляции, отдельно учти его, "
+                        "но всё равно вынеси самостоятельный вердикт по контексту."
                     ),
                 },
                 {"role": "system", "content": f"Правила конкретного чата:\n{self.chat_rules}"},
@@ -220,6 +262,7 @@ class AiModerator:
                     "role": "user",
                     "content": (
                         f"Автор спорного сообщения: {author}\n\n"
+                        f"Аргумент апелляции от пользователя:\n{appellant_reason[:1500] or 'не указан'}\n\n"
                         f"Контекст 30 сообщений:\n{context[:7000]}\n\n"
                         f"Спорное сообщение:\n{message_text[:3000]}"
                     ),

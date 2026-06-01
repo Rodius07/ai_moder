@@ -184,7 +184,7 @@ class BotStore:
             settings.video_model = value.strip() or None
         elif name == "ask_web_mode":
             mode = value.strip().casefold()
-            if mode not in {"auto", "openrouter", "local", "off"}:
+            if mode not in {"auto", "off"}:
                 raise ValueError(f"Unknown web mode: {value}")
             settings.ask_web_mode = mode
             settings.ask_web_enabled = mode != "off"
