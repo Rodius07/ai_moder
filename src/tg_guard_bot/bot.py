@@ -131,7 +131,13 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
     return dp
 
 
-async def on_startup(bot: Bot, store: BotStore, settings: Settings) -> None:
+async def on_startup(
+    bot: Bot,
+    store: BotStore,
+    settings: Settings,
+    ai_moderator: AiModerator | None,
+    tts: ElevenLabsTTS | None,
+) -> None:
     await bot.set_my_commands(
         [
             BotCommand(command="rules", description="показать устав и базовые правила"),
@@ -150,7 +156,7 @@ async def on_startup(bot: Bot, store: BotStore, settings: Settings) -> None:
         ]
     )
     create_task(silent_support_loop(bot, store, settings))
-    create_task(daily_schedule_loop(bot, store, settings))
+    create_task(daily_schedule_loop(bot, store, settings, ai_moderator, tts))
 
 
 def load_chat_rules(path: str | None) -> str:
@@ -415,6 +421,11 @@ def render_donation_message(settings: Settings, balance: float | None = None) ->
 
 
 async def openrouter_balance(settings: Settings) -> float | None:
+    account = await openrouter_account(settings)
+    return account["balance"] if account else None
+
+
+async def openrouter_account(settings: Settings) -> dict[str, float] | None:
     if not settings.openai_api_key or not settings.openai_base_url:
         return None
     if "openrouter.ai" not in settings.openai_base_url:
@@ -427,9 +438,35 @@ async def openrouter_balance(settings: Settings) -> float | None:
             )
             response.raise_for_status()
         data = response.json().get("data", {})
-        return float(data.get("total_credits", 0)) - float(data.get("total_usage", 0))
+        total_credits = float(data.get("total_credits", 0))
+        total_usage = float(data.get("total_usage", 0))
+        return {
+            "total_credits": total_credits,
+            "total_usage": total_usage,
+            "balance": total_credits - total_usage,
+        }
     except Exception:
         logger.exception("failed to fetch OpenRouter balance")
+        return None
+
+
+async def elevenlabs_subscription(settings: Settings) -> dict[str, int] | None:
+    if not settings.elevenlabs_api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(
+                "https://api.elevenlabs.io/v1/user/subscription",
+                headers={"xi-api-key": settings.elevenlabs_api_key},
+            )
+            response.raise_for_status()
+        data = response.json()
+        return {
+            "character_count": int(data.get("character_count", 0) or 0),
+            "character_limit": int(data.get("character_limit", 0) or 0),
+        }
+    except Exception:
+        logger.exception("failed to fetch ElevenLabs subscription")
         return None
 
 
@@ -619,8 +656,11 @@ async def settings_menu(message: Message, command: CommandObject, store: BotStor
 
 
 @router.message(Command("stats"))
-async def stats(message: Message, store: BotStore) -> None:
-    await message.answer(render_stats(message.chat.id, store), parse_mode=ParseMode.MARKDOWN)
+async def stats(message: Message, store: BotStore, settings: Settings) -> None:
+    await message.answer(
+        await render_stats(message.chat.id, store, settings),
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
 @router.message(Command("transcribe", "text", "stt"))
@@ -1427,10 +1467,11 @@ def calculate_relaxation(users: dict[str, UserStats], today: str) -> int:
     return max(0, min(100, base))
 
 
-def render_stats(chat_id: int, store: BotStore) -> str:
+async def render_stats(chat_id: int, store: BotStore, settings: Settings) -> str:
     users = store.users_for(chat_id)
     today = datetime.now().date().isoformat()
     ass_votes = store.ass_votes_for(chat_id, today)
+    usage = await render_usage_stats(store, settings, today)
     lines = ["*Статистика братства*", ""]
     if not users:
         lines.append("Пока чистый лист. Очко разжато, журнал пуст.")
@@ -1467,6 +1508,38 @@ def render_stats(chat_id: int, store: BotStore) -> str:
             "Опрос очка: "
             + ", ".join(f"{ASS_POLL_LABELS[key]} `{value}`" for key, value in counts.items())
         )
+    if usage:
+        lines.extend(["", usage])
+    return "\n".join(lines)
+
+
+async def render_usage_stats(store: BotStore, settings: Settings, today: str) -> str:
+    openrouter = await openrouter_account(settings)
+    elevenlabs = await elevenlabs_subscription(settings)
+    snapshot = store.usage_snapshot_for(today)
+    store.update_usage_snapshot(
+        today,
+        openrouter_total_usage=openrouter["total_usage"] if openrouter else None,
+        elevenlabs_character_count=elevenlabs["character_count"] if elevenlabs else None,
+        elevenlabs_character_limit=elevenlabs["character_limit"] if elevenlabs else None,
+    )
+    snapshot = store.usage_snapshot_for(today)
+
+    lines = ["*Расходы сегодня*"]
+    if openrouter and snapshot.openrouter_total_usage is not None:
+        spent = max(0.0, openrouter["total_usage"] - snapshot.openrouter_total_usage)
+        lines.append(f"- OpenRouter: `${spent:.4f}` за день, осталось `${openrouter['balance']:.2f}`")
+    else:
+        lines.append("- OpenRouter: не удалось получить баланс")
+
+    if elevenlabs and snapshot.elevenlabs_character_count is not None:
+        burned = max(0, elevenlabs["character_count"] - snapshot.elevenlabs_character_count)
+        remaining = max(0, elevenlabs["character_limit"] - elevenlabs["character_count"])
+        lines.append(
+            f"- ElevenLabs: `{burned}` credits/символов за день, осталось `{remaining}`"
+        )
+    else:
+        lines.append("- ElevenLabs: не удалось получить лимит")
     return "\n".join(lines)
 
 
@@ -2162,6 +2235,44 @@ async def send_silent_support_alert(
         await bot.send_message(target_chat, text, parse_mode=ParseMode.MARKDOWN)
 
 
+async def send_morning_voice(
+    bot: Bot,
+    chat_id: int,
+    settings: Settings,
+    ai_moderator: AiModerator | None,
+    tts: ElevenLabsTTS | None,
+) -> None:
+    fallback = random.choice(MORNING_MESSAGES)
+    if not ai_moderator or not tts:
+        await bot.send_message(chat_id, fallback, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    current_time = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S MSK, %A")
+    prompt = (
+        "Сгенерируй короткое уникальное утреннее голосовое пожелание для братского чата "
+        "в стиле уверенного Маркаряна: энергично, по-братски, с юмором, без занудства. "
+        "1-3 предложения. Не упоминай, что ты ИИ. Не повторяй шаблоны."
+    )
+    try:
+        text = await ai_moderator.answer(
+            prompt,
+            "",
+            "утренний планировщик",
+            "",
+            current_time,
+            settings.openai_model,
+        )
+        audio = await tts.synthesize_voice(text)
+        await bot.send_voice(  # type: ignore[call-arg]
+            chat_id,
+            BufferedInputFile(audio, filename="morning.ogg"),
+            caption="Утренний заряд от Маркаряна",
+        )
+    except Exception:
+        logger.exception("morning voice failed chat=%s", chat_id)
+        await bot.send_message(chat_id, fallback, parse_mode=ParseMode.MARKDOWN)
+
+
 async def is_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -2170,7 +2281,13 @@ async def is_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
 
 
-async def daily_schedule_loop(bot: Bot, store: BotStore, settings: Settings) -> None:
+async def daily_schedule_loop(
+    bot: Bot,
+    store: BotStore,
+    settings: Settings,
+    ai_moderator: AiModerator | None,
+    tts: ElevenLabsTTS | None,
+) -> None:
     while True:
         await sleep(60)
         now = datetime.now()
@@ -2184,11 +2301,7 @@ async def daily_schedule_loop(bot: Bot, store: BotStore, settings: Settings) -> 
                 if runtime.last_morning_message_date == today:
                     continue
                 with suppress(TelegramBadRequest, TelegramForbiddenError):
-                    await bot.send_message(
-                        chat_id,
-                        random.choice(MORNING_MESSAGES),
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
+                    await send_morning_voice(bot, chat_id, settings, ai_moderator, tts)
                     store.mark_morning_message_sent(chat_id, today)
 
         if now.hour != 22 or now.minute != 30:
@@ -2231,7 +2344,7 @@ async def daily_schedule_loop(bot: Bot, store: BotStore, settings: Settings) -> 
             with suppress(TelegramBadRequest, TelegramForbiddenError):
                 await bot.send_message(
                     chat_id,
-                    render_stats(chat_id, store),
+                    await render_stats(chat_id, store, settings),
                     parse_mode=ParseMode.MARKDOWN,
                 )
                 balance = await openrouter_balance(settings)

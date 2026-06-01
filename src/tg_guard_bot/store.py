@@ -73,6 +73,14 @@ class PendingSettingAction:
     created_at: str = ""
 
 
+@dataclass
+class UsageSnapshot:
+    day: str
+    openrouter_total_usage: float | None = None
+    elevenlabs_character_count: int | None = None
+    elevenlabs_character_limit: int | None = None
+
+
 class BotStore:
     def __init__(self, path: str) -> None:
         self.path = Path(path)
@@ -82,6 +90,7 @@ class BotStore:
         self.ass_votes: dict[str, dict[str, dict[str, str]]] = {}
         self.moderation_cases: dict[str, dict[str, ModerationCase]] = {}
         self.pending_setting_actions: dict[str, PendingSettingAction] = {}
+        self.usage_snapshots: dict[str, UsageSnapshot] = {}
         self.load()
 
     def load(self) -> None:
@@ -114,6 +123,10 @@ class BotStore:
             action_id: PendingSettingAction(**action)
             for action_id, action in payload.get("pending_setting_actions", {}).items()
         }
+        self.usage_snapshots = {
+            day: UsageSnapshot(**snapshot)
+            for day, snapshot in payload.get("usage_snapshots", {}).items()
+        }
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,6 +150,9 @@ class BotStore:
             "pending_setting_actions": {
                 action_id: asdict(action)
                 for action_id, action in self.pending_setting_actions.items()
+            },
+            "usage_snapshots": {
+                day: asdict(snapshot) for day, snapshot in self.usage_snapshots.items()
             },
         }
         temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -171,6 +187,30 @@ class BotStore:
             raise ValueError(f"Unknown setting: {name}")
         self.save()
         return settings
+
+    def usage_snapshot_for(self, day: str) -> UsageSnapshot:
+        if day not in self.usage_snapshots:
+            self.usage_snapshots[day] = UsageSnapshot(day=day)
+            self.save()
+        return self.usage_snapshots[day]
+
+    def update_usage_snapshot(
+        self,
+        day: str,
+        *,
+        openrouter_total_usage: float | None = None,
+        elevenlabs_character_count: int | None = None,
+        elevenlabs_character_limit: int | None = None,
+    ) -> UsageSnapshot:
+        snapshot = self.usage_snapshot_for(day)
+        if openrouter_total_usage is not None and snapshot.openrouter_total_usage is None:
+            snapshot.openrouter_total_usage = openrouter_total_usage
+        if elevenlabs_character_count is not None and snapshot.elevenlabs_character_count is None:
+            snapshot.elevenlabs_character_count = elevenlabs_character_count
+        if elevenlabs_character_limit is not None and snapshot.elevenlabs_character_limit is None:
+            snapshot.elevenlabs_character_limit = elevenlabs_character_limit
+        self.save()
+        return snapshot
 
     def update_text_setting(self, chat_id: int, name: str, value: str) -> ChatRuntimeSettings:
         settings = self.settings_for(chat_id)
