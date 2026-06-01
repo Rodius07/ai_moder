@@ -31,7 +31,7 @@ from tg_guard_bot.models import ModerationResult, Verdict
 from tg_guard_bot.rules import RuleConfig, RuleEngine
 from tg_guard_bot.state import WarningStore
 from tg_guard_bot.store import BotStore, ModerationCase, StoredChatMessage, UserStats
-from tg_guard_bot.transcription import LocalTranscriber, transcribe_message_media
+from tg_guard_bot.transcription import ElevenLabsTranscriber, LocalTranscriber, transcribe_message_media
 from tg_guard_bot.tts import ElevenLabsTTS
 from tg_guard_bot.video_generation import VideoGenerationError, VideoGenerator
 
@@ -64,16 +64,21 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
     warnings = WarningStore()
     history = MessageHistory(limit=100)
     store = BotStore(settings.data_path)
-    transcriber = (
-        LocalTranscriber(
+    if settings.enable_local_transcription and settings.elevenlabs_api_key:
+        transcriber = ElevenLabsTranscriber(
+            api_key=settings.elevenlabs_api_key,
+            model_id=settings.elevenlabs_stt_model_id,
+            language=settings.whisper_language,
+        )
+    elif settings.enable_local_transcription:
+        transcriber = LocalTranscriber(
             model_size=settings.whisper_model_size,
             device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
             language=settings.whisper_language,
         )
-        if settings.enable_local_transcription
-        else None
-    )
+    else:
+        transcriber = None
     tts = (
         ElevenLabsTTS(
             api_key=settings.elevenlabs_api_key,
@@ -632,7 +637,7 @@ async def transcribe_command(
     transcriber: LocalTranscriber | None,
 ) -> None:
     if not transcriber:
-        await message.answer("Локальная расшифровка выключена.")
+        await message.answer("Расшифровка выключена.")
         return
     if not message.reply_to_message:
         await message.answer(

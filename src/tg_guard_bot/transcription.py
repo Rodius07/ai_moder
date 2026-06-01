@@ -6,6 +6,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
+
 from aiogram import Bot
 from aiogram.types import Message
 
@@ -60,10 +62,39 @@ class LocalTranscriber:
         return " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
 
 
+class ElevenLabsTranscriber:
+    def __init__(
+        self,
+        api_key: str,
+        model_id: str = "scribe_v2",
+        language: str | None = "ru",
+    ) -> None:
+        self.api_key = api_key
+        self.model_id = model_id
+        self.language = language
+
+    async def transcribe(self, path: Path) -> str:
+        headers = {"xi-api-key": self.api_key}
+        data = {"model_id": self.model_id}
+        if self.language:
+            data["language_code"] = self.language
+        async with httpx.AsyncClient(timeout=90) as client:
+            with path.open("rb") as file:
+                response = await client.post(
+                    "https://api.elevenlabs.io/v1/speech-to-text",
+                    headers=headers,
+                    data=data,
+                    files={"file": (path.name, file, "application/octet-stream")},
+                )
+            response.raise_for_status()
+        payload = response.json()
+        return str(payload.get("text") or "").strip()
+
+
 async def transcribe_message_media(
     message: Message,
     bot: Bot,
-    transcriber: LocalTranscriber,
+    transcriber: LocalTranscriber | ElevenLabsTranscriber,
     max_file_bytes: int,
 ) -> str | None:
     media = extract_media_info(message)
@@ -77,7 +108,7 @@ async def transcribe_message_media(
             media.file_size,
             max_file_bytes,
         )
-        return f"[{media.kind}: файл слишком большой для локальной расшифровки]"
+        return f"[{media.kind}: файл слишком большой для расшифровки]"
 
     with tempfile.TemporaryDirectory(prefix="tg-guard-media-") as temp_dir:
         file = await bot.get_file(media.file_id)
@@ -91,7 +122,7 @@ async def transcribe_message_media(
         transcript = await transcriber.transcribe(destination)
         if not transcript:
             return None
-        return f"[{media.kind}, распознано локально]: {transcript}"
+        return f"[{media.kind}, расшифровано]: {transcript}"
 
 
 def extract_media_info(message: Message) -> MediaInfo | None:
