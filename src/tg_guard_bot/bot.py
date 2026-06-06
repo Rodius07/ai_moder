@@ -725,7 +725,6 @@ def moderation_case_for_reply(
 async def settings_menu(
     message: Message,
     command: CommandObject,
-    bot: Bot,
     store: BotStore,
     settings_webapp: SettingsWebApp,
 ) -> None:
@@ -741,7 +740,7 @@ async def settings_menu(
             }:
                 await message.answer(
                     "Обычные настройки теперь находятся в Mini App.",
-                    reply_markup=await settings_button(message, bot, settings_webapp),
+                    reply_markup=settings_button(message, settings_webapp),
                 )
                 return
             store.update_text_setting(
@@ -760,13 +759,12 @@ async def settings_menu(
 
     await message.answer(
         "Настройки этого чата открываются в Mini App.",
-        reply_markup=await settings_button(message, bot, settings_webapp),
+        reply_markup=settings_button(message, settings_webapp),
     )
 
 
-async def settings_button(
+def settings_button(
     message: Message,
-    bot: Bot,
     settings_webapp: SettingsWebApp,
 ) -> InlineKeyboardMarkup:
     user_id = message.from_user.id if message.from_user else 0
@@ -774,12 +772,7 @@ async def settings_button(
     if message.chat.type is ChatType.PRIVATE:
         button = InlineKeyboardButton(text="Открыть настройки", web_app=WebAppInfo(url=url))
     else:
-        me = await bot.get_me()
-        launch_code = settings_webapp.create_private_launch(message.chat.id, user_id)
-        button = InlineKeyboardButton(
-            text="Открыть Mini App",
-            url=f"https://t.me/{me.username}?start=settings_{launch_code}",
-        )
+        button = InlineKeyboardButton(text="Открыть настройки", url=url)
     return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
