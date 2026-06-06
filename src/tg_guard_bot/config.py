@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     donation_usdt_address: str | None = Field(None, alias="DONATION_USDT_ADDRESS")
     donation_usdt_network: str = Field("TON/TRC20", alias="DONATION_USDT_NETWORK")
     donation_rub_details: str | None = Field(None, alias="DONATION_RUB_DETAILS")
+    settings_web_url: str = Field(
+        "https://89-124-122-2.sslip.io/moder-settings/",
+        alias="SETTINGS_WEB_URL",
+    )
+    settings_web_host: str = Field("127.0.0.1", alias="SETTINGS_WEB_HOST")
+    settings_web_port: int = Field(8081, alias="SETTINGS_WEB_PORT")
 
     delete_high_confidence: bool = Field(True, alias="DELETE_HIGH_CONFIDENCE")
     warn_in_chat: bool = Field(True, alias="WARN_IN_CHAT")

@@ -79,7 +79,7 @@ python -m tg_guard_bot.main
 
 - `/start` - короткая справка;
 - `/rules` - текущие базовые правила;
-- `/settings` - настройки контекста `/ask`, модерации и молчащих;
+- `/settings` - открыть Telegram Mini App со всеми настройками чата;
 - `/stats` - статистика нарушений и разжатость дня;
 - `/ask вопрос` - задать вопрос ИИ;
 - `/image промпт` или `/img промпт` - сгенерировать картинку через OpenRouter;
@@ -89,18 +89,9 @@ python -m tg_guard_bot.main
 - `/donate` - реквизиты поддержки бота;
 - `/warns` - посмотреть свои предупреждения.
 
-Полезные настройки в чате:
-
-- `/settings webmode auto` - умный web-поиск только для свежих/поисковых вопросов;
-- `/settings webmode openrouter` - всегда давать модели OpenRouter web search tool;
-- `/settings webmode local` - DuckDuckGo + выдержки страниц;
-- `/settings webmode off` - выключить интернет для `/ask`;
-- `/settings modmodel google/gemini-2.0-flash-lite-001` - дешевая модель для проверки каждого сообщения;
-- `/settings model openai/gpt-5-mini` - мощная общая модель для `/ask`, `/report`, `/appeal`;
-- `/settings image google/gemini-2.5-flash-image` - модель картинок;
-- `/settings image black-forest-labs/flux.2-pro` - пример альтернативной модели.
-- `/settings video x-ai/grok-imagine-video` - модель видео.
-- `/settings interject 0` или `1` - выключить/включить периодические влезания мощной модели.
+В Mini App можно менять контекст, поддержку молчащих, анти-душнилу,
+самостоятельные влезания, все модели и режим веб-поиска. Доступны два поисковых
+движка: локальный DuckDuckGo с чтением найденных страниц и ChatGPT Search.
 
 `/ask`, `/image` и `/video` понимают явный запрос контекста: например,
 `/image сделай мем по последним 15 сообщениям`. Для изменения картинки или

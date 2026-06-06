@@ -5,8 +5,9 @@ import base64
 import mimetypes
 import random
 import re
-import textwrap
-from asyncio import create_task, sleep
+import subprocess
+import tempfile
+from asyncio import create_task, sleep, to_thread
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -20,7 +21,14 @@ from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BotCommand
-from aiogram.types import CallbackQuery, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    ChatPermissions,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    WebAppInfo,
+)
 from aiogram.types import BufferedInputFile
 
 from tg_guard_bot.ai import AiModerator
@@ -29,11 +37,13 @@ from tg_guard_bot.history import ChatMessage, MessageHistory, format_context
 from tg_guard_bot.image_generation import ImageGenerator
 from tg_guard_bot.models import ModerationResult, Verdict
 from tg_guard_bot.rules import RuleConfig, RuleEngine
+from tg_guard_bot.settings_webapp import SettingsWebApp
 from tg_guard_bot.state import WarningStore
 from tg_guard_bot.store import BotStore, ModerationCase, StoredChatMessage, UserStats
 from tg_guard_bot.transcription import ElevenLabsTranscriber, LocalTranscriber, transcribe_message_media
 from tg_guard_bot.tts import ElevenLabsTTS
 from tg_guard_bot.video_generation import VideoGenerationError, VideoGenerator
+from tg_guard_bot.web_search import format_search_results, search_web_deep
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -64,6 +74,13 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
     warnings = WarningStore()
     history = MessageHistory(limit=100)
     store = BotStore(settings.data_path)
+    settings_webapp = SettingsWebApp(
+        store,
+        settings.telegram_bot_token,
+        settings.settings_web_url,
+        settings.settings_web_host,
+        settings.settings_web_port,
+    )
     if settings.enable_local_transcription and settings.elevenlabs_api_key:
         transcriber = ElevenLabsTranscriber(
             api_key=settings.elevenlabs_api_key,
@@ -125,8 +142,10 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         tts=tts,
         image_generator=image_generator,
         video_generator=video_generator,
+        settings_webapp=settings_webapp,
     )
     dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
     dp.include_router(router)
     return dp
 
@@ -137,6 +156,7 @@ async def on_startup(
     settings: Settings,
     ai_moderator: AiModerator | None,
     tts: ElevenLabsTTS | None,
+    settings_webapp: SettingsWebApp,
 ) -> None:
     await bot.set_my_commands(
         [
@@ -155,8 +175,13 @@ async def on_startup(
             BotCommand(command="resetstats", description="админ: обнулить счетчики"),
         ]
     )
+    await settings_webapp.start()
     create_task(silent_support_loop(bot, store, settings))
     create_task(daily_schedule_loop(bot, store, settings, ai_moderator, tts))
+
+
+async def on_shutdown(settings_webapp: SettingsWebApp) -> None:
+    await settings_webapp.stop()
 
 
 def load_chat_rules(path: str | None) -> str:
@@ -228,11 +253,14 @@ async def ask(
     history: MessageHistory,
     store: BotStore,
     tts: ElevenLabsTTS | None,
+    transcriber: LocalTranscriber | ElevenLabsTranscriber | None,
 ) -> None:
     question = (command.args or "").strip()
-    if not question:
+    if not question and not replied_video_message(message):
         await message.answer("Напишите вопрос после команды: /ask как оформить правила чата?")
         return
+    if not question:
+        question = "Проанализируй видео: что в нем происходит и что важно заметить?"
     if not ai_moderator:
         await message.answer("ИИ-ответы пока выключены: не задан OPENAI_API_KEY.")
         return
@@ -254,6 +282,14 @@ async def ask(
         current_time = datetime.now(ZoneInfo("Europe/Moscow")).strftime(
             "%Y-%m-%d %H:%M:%S MSK, %A"
         )
+        media_context, video_frames = await replied_video_context(
+            message,
+            bot,
+            settings,
+            transcriber,
+        )
+        if media_context:
+            question = f"{question}\n\nМатериалы из видео:\n{media_context[:5000]}"
         web_context = await search_preview_context(
             ai_moderator,
             settings,
@@ -272,6 +308,7 @@ async def ask(
             web_context,
             current_time,
             creative_model_for(runtime, settings),
+            image_data_urls=video_frames,
         )
     except Exception:
         logger.exception("ask failed chat=%s", message.chat.id)
@@ -627,32 +664,55 @@ def moderation_case_for_reply(
 
 
 @router.message(Command("settings", "sintings", "sitings"))
-async def settings_menu(message: Message, command: CommandObject, store: BotStore) -> None:
+async def settings_menu(
+    message: Message,
+    command: CommandObject,
+    store: BotStore,
+    settings_webapp: SettingsWebApp,
+) -> None:
     args = (command.args or "").strip().split()
     if len(args) >= 2:
         try:
             setting_name = normalize_setting_name(args[0])
-            if setting_name in {
+            if setting_name not in {
                 "ai_model",
                 "moderation_model",
                 "image_model",
                 "video_model",
-                "ask_web_mode",
             }:
-                runtime = store.update_text_setting(
-                    message.chat.id,
-                    setting_name,
-                    " ".join(args[1:]),
+                await message.answer(
+                    "Обычные настройки теперь находятся в Mini App.",
+                    reply_markup=settings_button(message, settings_webapp),
                 )
-            else:
-                runtime = store.update_setting(message.chat.id, setting_name, int(args[1]))
+                return
+            store.update_text_setting(
+                message.chat.id,
+                setting_name,
+                " ".join(args[1:]),
+            )
         except (ValueError, TypeError):
-            await message.answer(settings_help(store.settings_for(message.chat.id)))
+            await message.answer("Не понял модель. Открой панель или укажи команду смены модели.")
             return
-        await message.answer(settings_help(runtime), parse_mode=ParseMode.MARKDOWN)
+        await message.answer(
+            f"Модель обновлена: `{setting_name}` = `{md_escape(' '.join(args[1:]))}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
-    await message.answer(settings_help(store.settings_for(message.chat.id)), parse_mode=ParseMode.MARKDOWN)
+    await message.answer(
+        "Настройки этого чата открываются в Mini App.",
+        reply_markup=settings_button(message, settings_webapp),
+    )
+
+
+def settings_button(message: Message, settings_webapp: SettingsWebApp) -> InlineKeyboardMarkup:
+    user_id = message.from_user.id if message.from_user else 0
+    url = settings_webapp.launch_url(message.chat.id, user_id)
+    if message.chat.type is ChatType.PRIVATE:
+        button = InlineKeyboardButton(text="Открыть настройки", web_app=WebAppInfo(url=url))
+    else:
+        button = InlineKeyboardButton(text="Открыть настройки", url=url)
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
 @router.message(Command("stats"))
@@ -891,6 +951,7 @@ async def process_group_message(
             store,
             text,
             tts,
+            transcriber,
         ):
             return
     if not is_edit:
@@ -1413,48 +1474,19 @@ def should_use_web(question: str) -> bool:
 
 
 def settings_help(runtime) -> str:
-    return textwrap.dedent(
-        f"""
-        *Настройки братства*
-
-        Контекст модерации: `{runtime.moderation_context_limit}` сообщений
-        Контекст `/ask`: `{runtime.ask_context_limit}` сообщений
-        Модель модерации: `{runtime.moderation_model or 'из .env'}`
-        Модель `/ask`, `/report`, `/appeal`: `{runtime.ai_model or 'из .env'}`
-        Модель картинок: `{runtime.image_model or 'из .env'}`
-        Модель видео: `{runtime.video_model or 'из .env'}`
-        Интернет для `/ask`: `{'включен' if runtime.ask_web_enabled else 'выключен'}`
-        Web-поиск `/ask`: `openai/gpt-4o-search-preview`
-        Поисковых проходов для `/ask`: `{runtime.ask_web_results}`
-        Авто-поддержка молчащих: `{runtime.silent_support_hours}` часов
-        Анти-душнила: `{'включен' if runtime.anti_bore_enabled else 'выключен'}`
-        Влезания мощной модели: `{'включены' if runtime.creative_interjections_enabled else 'выключены'}`
-
-        *Команды настройки*
-        `/settings mod 15` - сколько сообщений давать модерации
-        `/settings ask 20` - сколько сообщений видит `/ask`
-        `/settings modmodel google/gemini-2.0-flash-lite-001` - дешевая проверка каждого сообщения
-        `/settings model openai/gpt-5-mini` - мощная модель для `/ask`, `/report`, `/appeal`
-        `/settings model anthropic/claude-sonnet-latest` - пример Anthropic для умных команд
-        `/settings image google/gemini-2.5-flash-image` - модель картинок OpenRouter
-        `/settings image black-forest-labs/flux.2-pro` - пример Flux
-        `/settings video x-ai/grok-imagine-video` - модель видео OpenRouter
-        `/settings webmode off` - интернет полностью выключен
-        `/settings web 1` - включить интернет для `/ask`
-        `/settings web 0` - выключить интернет для `/ask`
-        `/settings results 4` - сколько поисковых проходов давать `/ask`
-        `/settings silent 72` - через сколько часов молчания чекать брата
-        `/settings antibore 0` - выключить анти-душнилу
-        `/settings antibore 1` - включить анти-душнилу
-        `/settings interject 0` - выключить влезания мощной модели
-        `/settings interject 1` - включить влезания мощной модели
-
-        Если попросить бота поменять настройку обычным сообщением, он только покажет
-        предложение с кнопками подтверждения/отклонения.
-
-        Опечатки `/sintings` и `/sitings` тоже понимаю. Я не гордый.
-        """
-    ).strip()
+    return (
+        "*Настройки*\n"
+        f"`ask`: {runtime.ask_context_limit} · "
+        f"`модерация`: {runtime.moderation_context_limit} · "
+        f"`web`: {'вкл' if runtime.ask_web_enabled else 'выкл'} · "
+        f"`молчуны`: {runtime.silent_support_hours} ч · "
+        f"`анти-душнила`: {'вкл' if runtime.anti_bore_enabled else 'выкл'} · "
+        f"`влезания`: {'вкл' if runtime.creative_interjections_enabled else 'выкл'}\n\n"
+        "Обычные настройки меняются явной просьбой боту, например: "
+        "`Модер, поставь контекст ask 30 сообщений`. После этого нужно подтвердить кнопкой.\n\n"
+        "Модели меняются только командами: `/settings model ...`, "
+        "`/settings modmodel ...`, `/settings image ...`, `/settings video ...`."
+    )
 
 
 def calculate_relaxation(users: dict[str, UserStats], today: str) -> int:
@@ -1631,6 +1663,20 @@ async def search_preview_context(
     if not runtime.ask_web_enabled or not should_use_web(question):
         return ""
     query = web_search_query(question, context_messages)
+    if runtime.ask_web_mode == "local":
+        try:
+            results = await search_web_deep(query, runtime.ask_web_results)
+            result = format_search_results(results)
+            logger.info(
+                "local search context chat_query=%r results=%s chars=%s",
+                query[:160],
+                len(results),
+                len(result),
+            )
+            return result
+        except Exception:
+            logger.exception("local search failed query=%r", query[:160])
+            return ""
     try:
         result = await ai_moderator.web_search_context(
             query,
@@ -1776,6 +1822,92 @@ async def reply_image_data_url(message: Message, bot: Bot) -> str | None:
     return f"data:{mime_type};base64,{encoded}"
 
 
+def replied_video_message(message: Message) -> Message | None:
+    replied = message.reply_to_message
+    if not replied:
+        return None
+    if replied.video or replied.video_note:
+        return replied
+    if replied.document and (replied.document.mime_type or "").startswith("video/"):
+        return replied
+    return None
+
+
+async def replied_video_context(
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    transcriber: LocalTranscriber | ElevenLabsTranscriber | None,
+) -> tuple[str, list[str]]:
+    replied = replied_video_message(message)
+    if not replied:
+        return "", []
+
+    text = await appeal_message_text(replied, bot, settings, transcriber)
+    frames = await video_frame_data_urls(
+        replied,
+        bot,
+        settings.max_transcription_file_bytes,
+    )
+    return text, frames
+
+
+async def video_frame_data_urls(
+    message: Message,
+    bot: Bot,
+    max_file_bytes: int,
+) -> list[str]:
+    media = message.video or message.video_note
+    if not media and message.document and (message.document.mime_type or "").startswith("video/"):
+        media = message.document
+    if not media:
+        return []
+    file_size = getattr(media, "file_size", None)
+    if file_size and file_size > max_file_bytes:
+        logger.info("skip video frames: file too large size=%s max=%s", file_size, max_file_bytes)
+        return []
+
+    with tempfile.TemporaryDirectory(prefix="tg-guard-video-") as temp_dir:
+        telegram_file = await bot.get_file(media.file_id)
+        if not telegram_file.file_path:
+            return []
+        suffix = Path(telegram_file.file_path).suffix or ".mp4"
+        source = Path(temp_dir) / f"video{suffix}"
+        output_pattern = str(Path(temp_dir) / "frame-%02d.jpg")
+        await bot.download_file(telegram_file.file_path, source)
+        try:
+            await to_thread(extract_video_frames, source, output_pattern)
+        except (subprocess.CalledProcessError, OSError):
+            logger.exception("failed to extract video frames message=%s", message.message_id)
+            return []
+        frames: list[str] = []
+        for frame in sorted(Path(temp_dir).glob("frame-*.jpg"))[:4]:
+            encoded = base64.b64encode(frame.read_bytes()).decode()
+            frames.append(f"data:image/jpeg;base64,{encoded}")
+        return frames
+
+
+def extract_video_frames(source: Path, output_pattern: str) -> None:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source),
+            "-vf",
+            "fps=1/4,scale=768:-2:force_original_aspect_ratio=decrease",
+            "-frames:v",
+            "4",
+            "-q:v",
+            "4",
+            output_pattern,
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 async def maybe_send_anti_bore(
     message: Message,
     messages: list[StoredChatMessage],
@@ -1816,6 +1948,7 @@ async def maybe_handle_bot_addressed_message(
     store: BotStore,
     text: str,
     tts: ElevenLabsTTS | None,
+    transcriber: LocalTranscriber | ElevenLabsTranscriber | None,
 ) -> bool:
     arsen_question = extract_arsen_question(text)
     if not arsen_question and not is_addressed_to_bot(message, bot, text):
@@ -1824,7 +1957,24 @@ async def maybe_handle_bot_addressed_message(
         return False
 
     runtime = store.settings_for(message.chat.id)
-    proposal = propose_natural_setting_request(text)
+    if is_explicit_model_setting_request(text):
+        await message.reply(
+            "Модели меняются только явной командой `/settings model ...`, "
+            "`/settings modmodel ...`, `/settings image ...` или `/settings video ...`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return True
+
+    proposal = None
+    if is_explicit_setting_request(text):
+        try:
+            proposal = await ai_moderator.parse_setting_request(
+                text,
+                settings_prompt(runtime),
+                creative_model_for(runtime, settings),
+            )
+        except Exception:
+            logger.exception("AI settings parser failed chat=%s", message.chat.id)
     if proposal and message.from_user:
         action_id = store.create_pending_setting_action(
             message.chat.id,
@@ -1851,6 +2001,11 @@ async def maybe_handle_bot_addressed_message(
             ),
         )
         return True
+    if is_explicit_setting_request(text):
+        await message.reply(
+            "Не смог однозначно понять настройку. Сформулируй прямо: что изменить и на какое значение."
+        )
+        return True
 
     if not arsen_question and not looks_like_bot_question(message, bot, text):
         return False
@@ -1860,6 +2015,14 @@ async def maybe_handle_bot_addressed_message(
     asker = f"{message.from_user.full_name} ({message.from_user.id})" if message.from_user else ""
     current_time = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d %H:%M:%S MSK, %A")
     question = arsen_question or text
+    media_context, video_frames = await replied_video_context(
+        message,
+        bot,
+        settings,
+        transcriber,
+    )
+    if media_context:
+        question = f"{question}\n\nМатериалы из видео:\n{media_context[:5000]}"
     web_context = await search_preview_context(
         ai_moderator,
         settings,
@@ -1878,6 +2041,7 @@ async def maybe_handle_bot_addressed_message(
             web_context,
             current_time,
             creative_model_for(runtime, settings),
+            image_data_urls=video_frames,
         )
     except Exception:
         logger.exception("implicit bot answer failed chat=%s", message.chat.id)
@@ -1899,7 +2063,7 @@ def is_addressed_to_bot(message: Message, bot: Bot, text: str) -> bool:
     normalized = text.casefold().strip()
     if "@moderaaaatorrrrr_bot" in normalized:
         return True
-    return bool(re.search(r"(^|\s)(бот|ботик|модер|moder)(\s|,|!|\\?|$)", normalized))
+    return bool(re.match(r"^(?:ну\s+(?:че|чё)\s+)?(?:бот|ботик|модер|moder)\b[\s,:!?-]*", normalized))
 
 
 def looks_like_bot_question(message: Message, bot: Bot, text: str) -> bool:
@@ -1923,6 +2087,54 @@ def looks_like_bot_question(message: Message, bot: Bot, text: str) -> bool:
                 "чё ",
             )
         )
+    )
+
+
+def is_explicit_setting_request(text: str) -> bool:
+    normalized = text.casefold()
+    verbs = ("поставь", "измени", "установи", "включи", "выключи", "отключи", "переключи")
+    settings_markers = (
+        "настрой",
+        "контекст",
+        "сообщен",
+        "модерац",
+        "ask",
+        "аск",
+        "поиск",
+        "интернет",
+        "молчун",
+        "молч",
+        "анти-душ",
+        "влезан",
+        "подшуч",
+    )
+    return any(verb in normalized for verb in verbs) and any(
+        marker in normalized for marker in settings_markers
+    )
+
+
+def is_explicit_model_setting_request(text: str) -> bool:
+    normalized = text.casefold()
+    if not any(
+        verb in normalized
+        for verb in ("поставь", "измени", "установи", "переключи", "смени")
+    ):
+        return False
+    return bool(extract_model_id(text)) or any(
+        marker in normalized
+        for marker in ("модель", "modmodel", "image model", "video model")
+    )
+
+
+def settings_prompt(runtime) -> str:
+    return (
+        f"ask_context={runtime.ask_context_limit}\n"
+        f"moderation_context={runtime.moderation_context_limit}\n"
+        f"ask_web={int(runtime.ask_web_enabled)}\n"
+        f"ask_web_results={runtime.ask_web_results}\n"
+        f"silent_hours={runtime.silent_support_hours}\n"
+        f"anti_bore={int(runtime.anti_bore_enabled)}\n"
+        f"creative_interjections={int(runtime.creative_interjections_enabled)}"
     )
 
 
@@ -1973,7 +2185,15 @@ def render_setting_proposal(name: str, value: str) -> str:
 
 
 def apply_pending_setting_action(store: BotStore, chat_id: int, name: str, value: str):
-    if name in {"ask_context", "moderation_context", "silent_hours", "creative_interjections", "anti_bore"}:
+    if name in {
+        "ask_context",
+        "moderation_context",
+        "silent_hours",
+        "ask_web",
+        "ask_web_results",
+        "creative_interjections",
+        "anti_bore",
+    }:
         return store.update_setting(chat_id, name, int(value))
     return store.update_text_setting(chat_id, name, value)
 

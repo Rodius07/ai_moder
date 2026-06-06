@@ -120,6 +120,7 @@ class AiModerator:
         model: str | None = None,
         use_openrouter_web: bool = False,
         web_results: int = 4,
+        image_data_urls: list[str] | None = None,
     ) -> str:
         request_model = model or self.model
         extra_body = None
@@ -139,6 +140,23 @@ class AiModerator:
                 "Если вопрос требует актуальных фактов, поиска цитаты, трека, мемной отсылки "
                 "или ссылки, используй online-поиск модели. Не говори 'веб пустой' только из-за "
                 "того, что локальный web-контекст не приложен."
+            )
+        user_text = (
+            f"Автор вопроса: {asker}\n\n"
+            f"Текущая дата и время: {current_time or 'не задано'}\n\n"
+            f"Контекст последних сообщений:\n{context[:5000]}\n\n"
+            f"Web-контекст:\n{displayed_web_context[:5000] or 'нет данных'}\n\n"
+            f"Вопрос:\n{question[:3000]}"
+        )
+        user_content: str | list[dict[str, object]] = user_text
+        if image_data_urls:
+            user_content = [{"type": "text", "text": user_text}]
+            user_content.extend(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_data_url},
+                }
+                for image_data_url in image_data_urls[:4]
             )
         response = await self.client.chat.completions.create(
             model=request_model,
@@ -172,22 +190,70 @@ class AiModerator:
                         "Никогда не придумывай "
                         "платежные реквизиты, номера карт, адреса кошельков, апгрейды моделей "
                         "или админские изменения настроек. Если просят реквизиты, отправляй к "
-                        "команде /donate. Настройки меняются только явными командами /settings."
+                        "команде /donate. Никогда не меняй настройки по собственной инициативе. "
+                        "Обычные настройки меняются только после прямой просьбы пользователя и "
+                        "отдельного подтверждения, модели — только явными командами администратора."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": user_content,
+                },
+            ],
+        )
+        return (response.choices[0].message.content or "").strip()
+
+    async def parse_setting_request(
+        self,
+        request: str,
+        current_settings: str,
+        model: str | None = None,
+    ) -> tuple[str, str] | None:
+        response = await self.client.chat.completions.create(
+            model=model or self.model,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Разбери явную просьбу пользователя изменить настройку Telegram-бота. "
+                        "Никогда не предлагай изменение без прямой просьбы пользователя. "
+                        "Разрешены только параметры: ask_context (3-50), moderation_context "
+                        "(3-50), silent_hours (1-720), ask_web (0/1), ask_web_results (1-8), "
+                        "anti_bore (0/1), creative_interjections (0/1). Смена любых AI-моделей "
+                        "запрещена этим способом. Если просьба неявная, двусмысленная или касается "
+                        "модели, верни {\"action\": null, \"value\": null}. Иначе верни JSON "
+                        "{\"action\": \"имя\", \"value\": \"значение\"}."
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
-                        f"Автор вопроса: {asker}\n\n"
-                        f"Текущая дата и время: {current_time or 'не задано'}\n\n"
-                        f"Контекст последних сообщений:\n{context[:5000]}\n\n"
-                        f"Web-контекст:\n{displayed_web_context[:5000] or 'нет данных'}\n\n"
-                        f"Вопрос:\n{question[:3000]}"
+                        f"Текущие настройки:\n{current_settings}\n\n"
+                        f"Явная просьба пользователя:\n{request[:1500]}"
                     ),
                 },
             ],
         )
-        return (response.choices[0].message.content or "").strip()
+        try:
+            payload = json.loads(response.choices[0].message.content or "{}")
+        except json.JSONDecodeError:
+            return None
+        action = payload.get("action")
+        value = payload.get("value")
+        allowed = {
+            "ask_context",
+            "moderation_context",
+            "silent_hours",
+            "ask_web",
+            "ask_web_results",
+            "anti_bore",
+            "creative_interjections",
+        }
+        if action not in allowed or value is None:
+            return None
+        return str(action), str(value)
 
     async def web_search_context(
         self,
