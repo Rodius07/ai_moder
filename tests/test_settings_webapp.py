@@ -10,7 +10,7 @@ DEFAULTS = SimpleNamespace(
     openrouter_image_model="default-image",
     openrouter_video_model="default-video",
     elevenlabs_stt_model_id="scribe_v2",
-    elevenlabs_model_id="eleven_multilingual_v2",
+    elevenlabs_model_id="eleven_v3",
 )
 
 

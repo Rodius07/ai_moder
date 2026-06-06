@@ -13,7 +13,7 @@ import httpx
 class ElevenLabsTTS:
     api_key: str
     voice_id: str
-    model_id: str = "eleven_multilingual_v2"
+    model_id: str = "eleven_v3"
 
     async def synthesize_voice(self, text: str, model_id: str | None = None) -> bytes:
         mp3 = await self._synthesize_mp3(text, model_id)

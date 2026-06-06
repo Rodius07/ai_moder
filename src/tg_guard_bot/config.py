@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     )
     elevenlabs_api_key: str | None = Field(None, alias="ELEVENLABS_API_KEY")
     elevenlabs_voice_id: str | None = Field(None, alias="ELEVENLABS_VOICE_ID")
-    elevenlabs_model_id: str = Field("eleven_multilingual_v2", alias="ELEVENLABS_MODEL_ID")
+    elevenlabs_model_id: str = Field("eleven_v3", alias="ELEVENLABS_MODEL_ID")
     elevenlabs_stt_model_id: str = Field("scribe_v2", alias="ELEVENLABS_STT_MODEL_ID")
     chat_rules_path: str | None = Field("chat_rules.md", alias="CHAT_RULES_PATH")
     data_path: str = Field("data/bot_state.json", alias="DATA_PATH")
