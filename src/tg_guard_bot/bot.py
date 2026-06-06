@@ -1435,26 +1435,53 @@ async def send_pardon_message(bot: Bot, chat_id: int, user_name: str) -> None:
 
 
 async def safe_answer(message: Message, text: str) -> Message | None:
+    rendered = normalize_telegram_markdown(text[:3900])
     try:
-        return await message.answer(text[:3900], parse_mode=ParseMode.MARKDOWN)
-    except (TelegramBadRequest, TelegramForbiddenError):
+        return await message.answer(rendered, parse_mode=ParseMode.MARKDOWN)
+    except TelegramBadRequest:
+        return await message.answer(strip_markdown(rendered))
+    except TelegramForbiddenError:
         return None
 
 
 async def safe_reply_markdown(message: Message, text: str) -> Message | None:
+    rendered = normalize_telegram_markdown(text[:3900])
     try:
-        return await message.reply(text[:3900], parse_mode=ParseMode.MARKDOWN)
+        return await message.reply(rendered, parse_mode=ParseMode.MARKDOWN)
     except TelegramBadRequest:
-        return await message.reply(text[:3900])
+        return await message.reply(strip_markdown(rendered))
     except TelegramForbiddenError:
         return None
 
 
 async def edit_text_markdown(message: Message, text: str) -> None:
+    rendered = normalize_telegram_markdown(text[:3900])
     try:
-        await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        await message.edit_text(
+            rendered,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True,
+        )
     except TelegramBadRequest:
-        await message.edit_text(text, disable_web_page_preview=True)
+        await message.edit_text(strip_markdown(rendered), disable_web_page_preview=True)
+
+
+def normalize_telegram_markdown(text: str) -> str:
+    lines: list[str] = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s*#{1,6}\s+", "", line)
+        line = re.sub(r"^\s*[*+]\s+", "- ", line)
+        lines.append(line)
+    rendered = "\n".join(lines)
+    rendered = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", rendered)
+    rendered = re.sub(r"__([^_\n]+)__", r"_\1_", rendered)
+    rendered = re.sub(r"~~([^~\n]+)~~", r"\1", rendered)
+    return rendered
+
+
+def strip_markdown(text: str) -> str:
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1: \2", text)
+    return re.sub(r"(?<!\\)[*_`~]", "", text).replace("\\", "")
 
 
 async def user_display_name(bot: Bot, chat_id: int, user_id: int) -> str:
