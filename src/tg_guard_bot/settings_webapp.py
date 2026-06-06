@@ -6,9 +6,11 @@ import hmac
 import time
 from dataclasses import asdict
 from urllib.parse import urlencode
+from uuid import uuid4
 
 from aiohttp import web
 
+from tg_guard_bot.config import Settings
 from tg_guard_bot.store import BotStore
 
 
@@ -20,13 +22,30 @@ class SettingsWebApp:
         public_url: str,
         host: str,
         port: int,
+        settings: Settings,
     ) -> None:
         self.store = store
         self.bot_token = bot_token
         self.public_url = public_url.rstrip("/") + "/"
         self.host = host
         self.port = port
+        self.settings = settings
+        self.private_launches: dict[str, tuple[int, int, int]] = {}
         self.runner: web.AppRunner | None = None
+
+    def create_private_launch(self, chat_id: int, user_id: int) -> str:
+        code = uuid4().hex[:24]
+        self.private_launches[code] = (chat_id, user_id, int(time.time()) + 15 * 60)
+        return code
+
+    def consume_private_launch(self, code: str, user_id: int) -> int | None:
+        launch = self.private_launches.pop(code, None)
+        if not launch:
+            return None
+        chat_id, expected_user_id, expires_at = launch
+        if expected_user_id != user_id or expires_at < int(time.time()):
+            return None
+        return chat_id
 
     def launch_url(self, chat_id: int, user_id: int) -> str:
         expires_at = int(time.time()) + 24 * 60 * 60
@@ -59,7 +78,7 @@ class SettingsWebApp:
     async def get_settings(self, request: web.Request) -> web.Response:
         chat_id, _ = self._verify_token(request.query.get("token", ""))
         runtime = self.store.settings_for(chat_id)
-        return web.json_response(public_settings(runtime))
+        return web.json_response(public_settings(runtime, self.settings))
 
     async def update_settings(self, request: web.Request) -> web.Response:
         payload = await request.json()
@@ -84,6 +103,8 @@ class SettingsWebApp:
             "moderation_model": "moderation_model",
             "image_model": "image_model",
             "video_model": "video_model",
+            "transcription_model": "transcription_model",
+            "tts_model": "tts_model",
         }
         for name, (minimum, maximum) in numeric.items():
             if name not in values:
@@ -103,7 +124,7 @@ class SettingsWebApp:
                 raise web.HTTPBadRequest(text=f"empty {name}")
             self.store.update_text_setting(chat_id, store_name, value)
 
-        return web.json_response(public_settings(self.store.settings_for(chat_id)))
+        return web.json_response(public_settings(self.store.settings_for(chat_id), self.settings))
 
     def _verify_token(self, token: str) -> tuple[int, int]:
         try:
@@ -125,7 +146,7 @@ class SettingsWebApp:
             raise web.HTTPUnauthorized(text="invalid or expired link") from None
 
 
-def public_settings(runtime) -> dict[str, object]:
+def public_settings(runtime, defaults: Settings) -> dict[str, object]:
     data = asdict(runtime)
     return {
         "ask_context": data["ask_context_limit"],
@@ -137,10 +158,12 @@ def public_settings(runtime) -> dict[str, object]:
         "anti_bore": data["anti_bore_enabled"],
         "creative_interjections": data["creative_interjections_enabled"],
         "models": {
-            "main": data["ai_model"] or "",
-            "moderation": data["moderation_model"] or "",
-            "image": data["image_model"] or "",
-            "video": data["video_model"] or "",
+            "main": data["ai_model"] or defaults.openai_model,
+            "moderation": data["moderation_model"] or defaults.openai_moderation_model,
+            "image": data["image_model"] or defaults.openrouter_image_model,
+            "video": data["video_model"] or defaults.openrouter_video_model,
+            "transcription": data["transcription_model"] or defaults.elevenlabs_stt_model_id,
+            "tts": data["tts_model"] or defaults.elevenlabs_model_id,
         },
     }
 
@@ -204,6 +227,8 @@ SETTINGS_HTML = """<!doctype html>
       <div class="row"><label>Модель модерации</label><input class="wide" name="moderation_model" type="text"></div>
       <div class="row"><label>Модель картинок</label><input class="wide" name="image_model" type="text"></div>
       <div class="row"><label>Модель видео</label><input class="wide" name="video_model" type="text"></div>
+      <div class="row"><label>Распознавание речи</label><input class="wide" name="transcription_model" type="text"></div>
+      <div class="row"><label>Голос Арсена</label><input class="wide" name="tts_model" type="text"></div>
     </section>
     <button id="save" type="submit">Сохранить</button>
     <p id="status"></p>
@@ -225,6 +250,8 @@ function fill(data) {
   field("moderation_model").value = data.models.moderation;
   field("image_model").value = data.models.image;
   field("video_model").value = data.models.video;
+  field("transcription_model").value = data.models.transcription;
+  field("tts_model").value = data.models.tts;
 }
 async function load() {
   if (!token) throw new Error("Ссылка неполная. Открой панель снова через /settings.");
@@ -237,7 +264,7 @@ form.addEventListener("submit", async event => {
   const settings = {};
   for (const name of ["ask_context","moderation_context","ask_web_results","silent_hours"]) settings[name] = Number(field(name).value);
   for (const name of ["anti_bore","creative_interjections"]) settings[name] = field(name).checked;
-  for (const name of ["web_mode","ai_model","moderation_model","image_model","video_model"]) settings[name] = field(name).value;
+  for (const name of ["web_mode","ai_model","moderation_model","image_model","video_model","transcription_model","tts_model"]) settings[name] = field(name).value;
   try {
     const response = await fetch("api/settings", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token,settings})});
     if (!response.ok) throw new Error(await response.text());

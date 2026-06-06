@@ -80,6 +80,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         settings.settings_web_url,
         settings.settings_web_host,
         settings.settings_web_port,
+        settings,
     )
     if settings.enable_local_transcription and settings.elevenlabs_api_key:
         transcriber = ElevenLabsTranscriber(
@@ -199,7 +200,43 @@ def load_chat_rules(path: str | None) -> str:
 
 
 @router.message(Command("start"))
-async def start(message: Message) -> None:
+async def start(
+    message: Message,
+    command: CommandObject,
+    settings_webapp: SettingsWebApp,
+) -> None:
+    args = (command.args or "").strip()
+    if (
+        message.chat.type is ChatType.PRIVATE
+        and message.from_user
+        and args.startswith("settings_")
+    ):
+        chat_id = settings_webapp.consume_private_launch(
+            args.removeprefix("settings_"),
+            message.from_user.id,
+        )
+        if chat_id is not None:
+            await message.answer(
+                "Открывай настройки нужного группового чата:",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="Открыть Mini App",
+                                web_app=WebAppInfo(
+                                    url=settings_webapp.launch_url(
+                                        chat_id,
+                                        message.from_user.id,
+                                    )
+                                ),
+                            )
+                        ]
+                    ]
+                ),
+            )
+            return
+        await message.answer("Ссылка на настройки устарела. Вызови `/settings` в группе ещё раз.")
+        return
     await message.answer(
         "*Я на посту братства.*\n"
         "Проверяю чат, слушаю голосовые, помню контекст и иногда мягко хлопаю по плечу.\n\n"
@@ -287,6 +324,7 @@ async def ask(
             bot,
             settings,
             transcriber,
+            runtime.transcription_model,
         )
         if media_context:
             question = f"{question}\n\nМатериалы из видео:\n{media_context[:5000]}"
@@ -315,7 +353,13 @@ async def ask(
         await thinking.edit_text("Не получилось получить ответ ИИ. Попробуйте позже.")
         return
     if arsen_question is not None:
-        await send_arsen_voice(message, thinking, answer, tts)
+        await send_arsen_voice(
+            message,
+            thinking,
+            answer,
+            tts,
+            runtime.tts_model or settings.elevenlabs_model_id,
+        )
     else:
         await edit_text_markdown(thinking, answer[:3900])
     record_ask_exchange(message, bot, store, question, answer)
@@ -542,7 +586,14 @@ async def appeal(
         await message.answer("Этот страйк уже пересмотрен. Второй суд братства не собираем.")
         return
 
-    text = case.text or await appeal_message_text(disputed, bot, settings, transcriber)
+    runtime = store.settings_for(message.chat.id)
+    text = case.text or await appeal_message_text(
+        disputed,
+        bot,
+        settings,
+        transcriber,
+        runtime.transcription_model,
+    )
     if not text:
         await message.answer(
             "Не вижу текста или распознаваемой речи в спорном сообщении. Тут мне нечего пересматривать."
@@ -553,7 +604,6 @@ async def appeal(
     try:
         context = format_context(stored_to_chat_messages(store.latest_messages(message.chat.id, 30)))
         author = f"{case.user_name} ({case.user_id})"
-        runtime = store.settings_for(message.chat.id)
         answer = await ai_moderator.appeal(
             text,
             context,
@@ -596,7 +646,14 @@ async def report(
         await message.answer("На это сообщение страйк уже прилетал. Для пересмотра есть `/appeal`.")
         return
 
-    text = await appeal_message_text(disputed, bot, settings, transcriber)
+    runtime = store.settings_for(message.chat.id)
+    text = await appeal_message_text(
+        disputed,
+        bot,
+        settings,
+        transcriber,
+        runtime.transcription_model,
+    )
     if not text:
         await message.answer("Не вижу текста или распознаваемой речи в сообщении для доноса.")
         return
@@ -609,7 +666,6 @@ async def report(
             if disputed.from_user
             else "unknown"
         )
-        runtime = store.settings_for(message.chat.id)
         explanation, moderation_result = await ai_moderator.report(
             text,
             context,
@@ -634,6 +690,7 @@ async def appeal_message_text(
     bot: Bot,
     settings: Settings,
     transcriber: LocalTranscriber | None,
+    transcription_model: str | None = None,
 ) -> str:
     text = message.text or message.caption or ""
     if transcriber:
@@ -643,6 +700,7 @@ async def appeal_message_text(
                 bot,
                 transcriber,
                 settings.max_transcription_file_bytes,
+                transcription_model,
             )
         except Exception:
             logger.exception("failed to transcribe appeal media message_id=%s", message.message_id)
@@ -667,6 +725,7 @@ def moderation_case_for_reply(
 async def settings_menu(
     message: Message,
     command: CommandObject,
+    bot: Bot,
     store: BotStore,
     settings_webapp: SettingsWebApp,
 ) -> None:
@@ -682,7 +741,7 @@ async def settings_menu(
             }:
                 await message.answer(
                     "Обычные настройки теперь находятся в Mini App.",
-                    reply_markup=settings_button(message, settings_webapp),
+                    reply_markup=await settings_button(message, bot, settings_webapp),
                 )
                 return
             store.update_text_setting(
@@ -701,17 +760,26 @@ async def settings_menu(
 
     await message.answer(
         "Настройки этого чата открываются в Mini App.",
-        reply_markup=settings_button(message, settings_webapp),
+        reply_markup=await settings_button(message, bot, settings_webapp),
     )
 
 
-def settings_button(message: Message, settings_webapp: SettingsWebApp) -> InlineKeyboardMarkup:
+async def settings_button(
+    message: Message,
+    bot: Bot,
+    settings_webapp: SettingsWebApp,
+) -> InlineKeyboardMarkup:
     user_id = message.from_user.id if message.from_user else 0
     url = settings_webapp.launch_url(message.chat.id, user_id)
     if message.chat.type is ChatType.PRIVATE:
         button = InlineKeyboardButton(text="Открыть настройки", web_app=WebAppInfo(url=url))
     else:
-        button = InlineKeyboardButton(text="Открыть настройки", url=url)
+        me = await bot.get_me()
+        launch_code = settings_webapp.create_private_launch(message.chat.id, user_id)
+        button = InlineKeyboardButton(
+            text="Открыть Mini App",
+            url=f"https://t.me/{me.username}?start=settings_{launch_code}",
+        )
     return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
@@ -728,6 +796,7 @@ async def transcribe_command(
     message: Message,
     bot: Bot,
     settings: Settings,
+    store: BotStore,
     transcriber: LocalTranscriber | None,
 ) -> None:
     if not transcriber:
@@ -741,7 +810,14 @@ async def transcribe_command(
         return
     thinking = await message.answer("Слушаю и расшифровываю...")
     try:
-        text = await appeal_message_text(message.reply_to_message, bot, settings, transcriber)
+        runtime = store.settings_for(message.chat.id)
+        text = await appeal_message_text(
+            message.reply_to_message,
+            bot,
+            settings,
+            transcriber,
+            runtime.transcription_model,
+        )
     except Exception:
         logger.exception("manual transcription failed chat=%s", message.chat.id)
         await thinking.edit_text("Не получилось расшифровать.")
@@ -910,6 +986,7 @@ async def process_group_message(
                 bot,
                 transcriber,
                 settings.max_transcription_file_bytes,
+                store.settings_for(message.chat.id).transcription_model,
             )
         except Exception:
             logger.exception("failed to transcribe media message_id=%s", message.message_id)
@@ -1715,6 +1792,7 @@ async def send_arsen_voice(
     thinking: Message,
     answer: str,
     tts: ElevenLabsTTS | None,
+    tts_model: str | None = None,
 ) -> None:
     if not tts:
         await edit_text_markdown(thinking, "Голос Арсена не настроен: нужен ELEVENLABS_API_KEY и ELEVENLABS_VOICE_ID.")
@@ -1723,7 +1801,7 @@ async def send_arsen_voice(
         with suppress(TelegramBadRequest):
             await thinking.edit_text("Записываю голосом...")
     try:
-        audio = await tts.synthesize_voice(answer)
+        audio = await tts.synthesize_voice(answer, tts_model)
     except Exception:
         logger.exception("arsen tts failed chat=%s", message.chat.id)
         await edit_text_markdown(thinking, answer[:3900])
@@ -1838,12 +1916,19 @@ async def replied_video_context(
     bot: Bot,
     settings: Settings,
     transcriber: LocalTranscriber | ElevenLabsTranscriber | None,
+    transcription_model: str | None = None,
 ) -> tuple[str, list[str]]:
     replied = replied_video_message(message)
     if not replied:
         return "", []
 
-    text = await appeal_message_text(replied, bot, settings, transcriber)
+    text = await appeal_message_text(
+        replied,
+        bot,
+        settings,
+        transcriber,
+        transcription_model,
+    )
     frames = await video_frame_data_urls(
         replied,
         bot,
@@ -2020,6 +2105,7 @@ async def maybe_handle_bot_addressed_message(
         bot,
         settings,
         transcriber,
+        runtime.transcription_model,
     )
     if media_context:
         question = f"{question}\n\nМатериалы из видео:\n{media_context[:5000]}"
@@ -2048,7 +2134,13 @@ async def maybe_handle_bot_addressed_message(
         return False
     if arsen_question:
         thinking = await message.reply("Записываю голосом...")
-        await send_arsen_voice(message, thinking, answer, tts)
+        await send_arsen_voice(
+            message,
+            thinking,
+            answer,
+            tts,
+            runtime.tts_model or settings.elevenlabs_model_id,
+        )
     else:
         await safe_reply_markdown(message, answer[:3900])
     record_ask_exchange(message, bot, store, text, answer)
@@ -2463,6 +2555,8 @@ async def send_morning_voice(
     settings: Settings,
     ai_moderator: AiModerator | None,
     tts: ElevenLabsTTS | None,
+    ai_model: str | None = None,
+    tts_model: str | None = None,
 ) -> None:
     fallback = random.choice(MORNING_MESSAGES)
     if not ai_moderator or not tts:
@@ -2482,9 +2576,9 @@ async def send_morning_voice(
             "утренний планировщик",
             "",
             current_time,
-            settings.openai_model,
+            ai_model or settings.openai_model,
         )
-        audio = await tts.synthesize_voice(text)
+        audio = await tts.synthesize_voice(text, tts_model)
         await bot.send_voice(  # type: ignore[call-arg]
             chat_id,
             BufferedInputFile(audio, filename="morning.ogg"),
@@ -2523,7 +2617,15 @@ async def daily_schedule_loop(
                 if runtime.last_morning_message_date == today:
                     continue
                 with suppress(TelegramBadRequest, TelegramForbiddenError):
-                    await send_morning_voice(bot, chat_id, settings, ai_moderator, tts)
+                    await send_morning_voice(
+                        bot,
+                        chat_id,
+                        settings,
+                        ai_moderator,
+                        tts,
+                        creative_model_for(runtime, settings),
+                        runtime.tts_model or settings.elevenlabs_model_id,
+                    )
                     store.mark_morning_message_sent(chat_id, today)
 
         if now.hour != 22 or now.minute != 30:

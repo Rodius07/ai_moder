@@ -73,9 +73,9 @@ class ElevenLabsTranscriber:
         self.model_id = model_id
         self.language = language
 
-    async def transcribe(self, path: Path) -> str:
+    async def transcribe(self, path: Path, model_id: str | None = None) -> str:
         headers = {"xi-api-key": self.api_key}
-        data = {"model_id": self.model_id}
+        data = {"model_id": model_id or self.model_id}
         if self.language:
             data["language_code"] = self.language
         async with httpx.AsyncClient(timeout=90) as client:
@@ -96,6 +96,7 @@ async def transcribe_message_media(
     bot: Bot,
     transcriber: LocalTranscriber | ElevenLabsTranscriber,
     max_file_bytes: int,
+    model_id: str | None = None,
 ) -> str | None:
     media = extract_media_info(message)
     if not media:
@@ -119,7 +120,10 @@ async def transcribe_message_media(
         destination = Path(temp_dir) / f"media{suffix}"
         await bot.download_file(file.file_path, destination)
 
-        transcript = await transcriber.transcribe(destination)
+        if isinstance(transcriber, ElevenLabsTranscriber):
+            transcript = await transcriber.transcribe(destination, model_id=model_id)
+        else:
+            transcript = await transcriber.transcribe(destination)
         if not transcript:
             return None
         return f"[{media.kind}, расшифровано]: {transcript}"

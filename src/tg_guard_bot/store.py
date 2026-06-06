@@ -19,6 +19,8 @@ class ChatRuntimeSettings:
     moderation_model: str | None = None
     image_model: str | None = None
     video_model: str | None = None
+    transcription_model: str | None = None
+    tts_model: str | None = None
     silent_support_hours: int = 72
     anti_bore_enabled: bool = True
     creative_interjections_enabled: bool = False
@@ -222,6 +224,10 @@ class BotStore:
             settings.image_model = value.strip() or None
         elif name == "video_model":
             settings.video_model = value.strip() or None
+        elif name == "transcription_model":
+            settings.transcription_model = value.strip() or None
+        elif name == "tts_model":
+            settings.tts_model = value.strip() or None
         elif name == "ask_web_mode":
             mode = value.strip().casefold()
             if mode not in {"chatgpt", "local", "off"}:

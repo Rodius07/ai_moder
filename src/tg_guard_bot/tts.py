@@ -15,15 +15,15 @@ class ElevenLabsTTS:
     voice_id: str
     model_id: str = "eleven_multilingual_v2"
 
-    async def synthesize_voice(self, text: str) -> bytes:
-        mp3 = await self._synthesize_mp3(text)
+    async def synthesize_voice(self, text: str, model_id: str | None = None) -> bytes:
+        mp3 = await self._synthesize_mp3(text, model_id)
         return await asyncio.to_thread(convert_mp3_to_ogg_opus, mp3)
 
-    async def _synthesize_mp3(self, text: str) -> bytes:
+    async def _synthesize_mp3(self, text: str, model_id: str | None = None) -> bytes:
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}"
         payload = {
             "text": text[:4500],
-            "model_id": self.model_id,
+            "model_id": model_id or self.model_id,
             "voice_settings": {
                 "stability": 0.45,
                 "similarity_boost": 0.75,
