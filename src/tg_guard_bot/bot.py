@@ -40,7 +40,7 @@ from tg_guard_bot.rules import RuleConfig, RuleEngine
 from tg_guard_bot.settings_webapp import SettingsWebApp
 from tg_guard_bot.state import WarningStore
 from tg_guard_bot.store import BotStore, ModerationCase, StoredChatMessage, UserStats
-from tg_guard_bot.transcription import ElevenLabsTranscriber, LocalTranscriber, transcribe_message_media
+from tg_guard_bot.transcription import LocalTranscriber, transcribe_message_media
 from tg_guard_bot.tts import ElevenLabsTTS
 from tg_guard_bot.video_generation import VideoGenerationError, VideoGenerator
 from tg_guard_bot.web_search import format_search_results, search_web_deep
@@ -82,13 +82,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         settings.settings_web_port,
         settings,
     )
-    if settings.enable_local_transcription and settings.elevenlabs_api_key:
-        transcriber = ElevenLabsTranscriber(
-            api_key=settings.elevenlabs_api_key,
-            model_id=settings.elevenlabs_stt_model_id,
-            language=settings.whisper_language,
-        )
-    elif settings.enable_local_transcription:
+    if settings.enable_local_transcription:
         transcriber = LocalTranscriber(
             model_size=settings.whisper_model_size,
             device=settings.whisper_device,
@@ -290,7 +284,7 @@ async def ask(
     history: MessageHistory,
     store: BotStore,
     tts: ElevenLabsTTS | None,
-    transcriber: LocalTranscriber | ElevenLabsTranscriber | None,
+    transcriber: LocalTranscriber | None,
 ) -> None:
     question = (command.args or "").strip()
     if not question and not replied_video_message(message):
@@ -1935,7 +1929,7 @@ async def replied_video_context(
     message: Message,
     bot: Bot,
     settings: Settings,
-    transcriber: LocalTranscriber | ElevenLabsTranscriber | None,
+    transcriber: LocalTranscriber | None,
     transcription_model: str | None = None,
 ) -> tuple[str, list[str]]:
     replied = replied_video_message(message)
@@ -2053,7 +2047,7 @@ async def maybe_handle_bot_addressed_message(
     store: BotStore,
     text: str,
     tts: ElevenLabsTTS | None,
-    transcriber: LocalTranscriber | ElevenLabsTranscriber | None,
+    transcriber: LocalTranscriber | None,
 ) -> bool:
     arsen_question = extract_arsen_question(text)
     if not arsen_question and not is_addressed_to_bot(message, bot, text):

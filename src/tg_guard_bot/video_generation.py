@@ -81,7 +81,7 @@ class VideoGenerator:
                     video_response.raise_for_status()
                     return video_response.content, "video.mp4"
                 if state == "failed":
-                    raise RuntimeError(str(status.get("error") or "video generation failed"))
+                    raise VideoGenerationError(str(status.get("error") or "video generation failed"))
                 if asyncio.get_running_loop().time() >= deadline:
                     raise TimeoutError("video generation timed out")
                 await asyncio.sleep(8)

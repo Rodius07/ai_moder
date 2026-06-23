@@ -9,6 +9,7 @@ DEFAULTS = SimpleNamespace(
     openai_moderation_model="default-mod",
     openrouter_image_model="default-image",
     openrouter_video_model="default-video",
+    whisper_model_size="small",
     elevenlabs_stt_model_id="scribe_v2",
     elevenlabs_model_id="eleven_v3",
 )
@@ -41,7 +42,7 @@ def test_public_settings_does_not_expose_internal_timestamps(tmp_path) -> None:
     assert payload["web_mode"] == "chatgpt"
     assert payload["models"]["image"] == "default-image"
     assert payload["models"]["video"] == "default-video"
-    assert payload["models"]["transcription"] == "scribe_v2"
+    assert payload["models"]["transcription"] == "small"
     assert "last_creative_interjection_at" not in payload
 
 

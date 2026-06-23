@@ -148,6 +148,9 @@ class SettingsWebApp:
 
 def public_settings(runtime, defaults: Settings) -> dict[str, object]:
     data = asdict(runtime)
+    transcription_model = data["transcription_model"]
+    if not transcription_model or transcription_model == defaults.elevenlabs_stt_model_id:
+        transcription_model = defaults.whisper_model_size
     return {
         "ask_context": data["ask_context_limit"],
         "moderation_context": data["moderation_context_limit"],
@@ -162,7 +165,7 @@ def public_settings(runtime, defaults: Settings) -> dict[str, object]:
             "moderation": data["moderation_model"] or defaults.openai_moderation_model,
             "image": data["image_model"] or defaults.openrouter_image_model,
             "video": data["video_model"] or defaults.openrouter_video_model,
-            "transcription": data["transcription_model"] or defaults.elevenlabs_stt_model_id,
+            "transcription": transcription_model,
             "tts": data["tts_model"] or defaults.elevenlabs_model_id,
         },
     }

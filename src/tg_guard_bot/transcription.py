@@ -33,28 +33,33 @@ class LocalTranscriber:
         self.device = device
         self.compute_type = compute_type
         self.language = language
-        self._model = None
+        self._models = {}
 
-    async def transcribe(self, path: Path) -> str:
-        return await asyncio.to_thread(self._transcribe_sync, path)
+    async def transcribe(self, path: Path, model_id: str | None = None) -> str:
+        return await asyncio.to_thread(self._transcribe_sync, path, self._model_size(model_id))
 
-    def _transcribe_sync(self, path: Path) -> str:
-        if self._model is None:
+    def _model_size(self, model_id: str | None) -> str:
+        if not model_id or model_id == "scribe_v2":
+            return self.model_size
+        return model_id
+
+    def _transcribe_sync(self, path: Path, model_size: str) -> str:
+        if model_size not in self._models:
             from faster_whisper import WhisperModel
 
             logger.info(
                 "loading local speech model size=%s device=%s compute_type=%s",
-                self.model_size,
+                model_size,
                 self.device,
                 self.compute_type,
             )
-            self._model = WhisperModel(
-                self.model_size,
+            self._models[model_size] = WhisperModel(
+                model_size,
                 device=self.device,
                 compute_type=self.compute_type,
             )
 
-        segments, _info = self._model.transcribe(
+        segments, _info = self._models[model_size].transcribe(
             str(path),
             language=self.language,
             vad_filter=True,
@@ -121,6 +126,8 @@ async def transcribe_message_media(
         await bot.download_file(file.file_path, destination)
 
         if isinstance(transcriber, ElevenLabsTranscriber):
+            transcript = await transcriber.transcribe(destination, model_id=model_id)
+        elif isinstance(transcriber, LocalTranscriber):
             transcript = await transcriber.transcribe(destination, model_id=model_id)
         else:
             transcript = await transcriber.transcribe(destination)
