@@ -94,6 +94,7 @@ class SettingsWebApp:
             "silent_hours": (1, 720),
         }
         toggles = {
+            "content_moderation",
             "anti_bore",
             "creative_interjections",
         }
@@ -158,6 +159,7 @@ def public_settings(runtime, defaults: Settings) -> dict[str, object]:
         "web_mode": "chatgpt" if data["ask_web_mode"] == "auto" else data["ask_web_mode"],
         "ask_web_results": data["ask_web_results"],
         "silent_hours": data["silent_support_hours"],
+        "content_moderation": data["content_moderation_enabled"],
         "anti_bore": data["anti_bore_enabled"],
         "creative_interjections": data["creative_interjections_enabled"],
         "models": {
@@ -220,6 +222,7 @@ SETTINGS_HTML = """<!doctype html>
     </section>
     <section>
       <h2>Поведение</h2>
+      <div class="row"><label>Автомодерация контента<small>Проверять обычные сообщения</small></label><input name="content_moderation" type="checkbox"></div>
       <div class="row"><label>Поддержка молчащих<small>Через сколько часов</small></label><input name="silent_hours" type="number" min="1" max="720"></div>
       <div class="row"><label>Анти-душнила</label><input name="anti_bore" type="checkbox"></div>
       <div class="row"><label>Самостоятельно влезать в разговор</label><input name="creative_interjections" type="checkbox"></div>
@@ -247,7 +250,7 @@ tg?.ready(); tg?.expand();
 const field = name => form.elements.namedItem(name);
 function fill(data) {
   for (const name of ["ask_context","moderation_context","ask_web_results","silent_hours"]) field(name).value = data[name];
-  for (const name of ["anti_bore","creative_interjections"]) field(name).checked = data[name];
+  for (const name of ["content_moderation","anti_bore","creative_interjections"]) field(name).checked = data[name];
   field("web_mode").value = data.web_mode;
   field("ai_model").value = data.models.main;
   field("moderation_model").value = data.models.moderation;
@@ -266,7 +269,7 @@ form.addEventListener("submit", async event => {
   event.preventDefault(); save.disabled = true; statusEl.textContent = "Сохраняю...";
   const settings = {};
   for (const name of ["ask_context","moderation_context","ask_web_results","silent_hours"]) settings[name] = Number(field(name).value);
-  for (const name of ["anti_bore","creative_interjections"]) settings[name] = field(name).checked;
+  for (const name of ["content_moderation","anti_bore","creative_interjections"]) settings[name] = field(name).checked;
   for (const name of ["web_mode","ai_model","moderation_model","image_model","video_model","transcription_model","tts_model"]) settings[name] = field(name).value;
   try {
     const response = await fetch("api/settings", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token,settings})});

@@ -59,6 +59,14 @@ def test_store_toggles_creative_interjections(tmp_path) -> None:
     assert settings.creative_interjections_enabled is False
 
 
+def test_store_toggles_content_moderation(tmp_path) -> None:
+    store = BotStore(str(tmp_path / "state.json"))
+
+    settings = store.update_setting(1, "content_moderation", 0)
+
+    assert settings.content_moderation_enabled is False
+
+
 def test_store_tracks_daily_and_all_time_violations(tmp_path) -> None:
     store = BotStore(str(tmp_path / "state.json"))
 

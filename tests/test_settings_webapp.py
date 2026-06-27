@@ -40,6 +40,7 @@ def test_public_settings_does_not_expose_internal_timestamps(tmp_path) -> None:
 
     assert payload["ask_context"] == 20
     assert payload["web_mode"] == "chatgpt"
+    assert payload["content_moderation"] is True
     assert payload["models"]["image"] == "default-image"
     assert payload["models"]["video"] == "default-video"
     assert payload["models"]["transcription"] == "small"

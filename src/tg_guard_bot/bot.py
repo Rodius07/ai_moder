@@ -986,9 +986,6 @@ async def process_group_message(
         return
 
     store.touch_user(message.chat.id, message.from_user.id, message.from_user.full_name)
-    if not is_edit:
-        await maybe_count_support(message, store, text)
-
     current_history_message = ChatMessage(
         user_id=message.from_user.id,
         user_name=message.from_user.full_name,
@@ -1018,6 +1015,16 @@ async def process_group_message(
             transcriber,
         ):
             return
+    if not runtime.content_moderation_enabled:
+        logger.info(
+            "skip automatic content moderation edited=%s chat=%s user=%s",
+            is_edit,
+            message.chat.id,
+            message.from_user.id,
+        )
+        return
+    if not is_edit:
+        await maybe_count_support(message, store, text)
     if not is_edit:
         await maybe_send_anti_bore(message, persisted_context_messages, store)
 
@@ -1530,6 +1537,10 @@ def normalize_setting_name(name: str) -> str:
         "anti_bore": "anti_bore",
         "душнила": "anti_bore",
         "антидушнила": "anti_bore",
+        "content_moderation": "content_moderation",
+        "automod": "content_moderation",
+        "автомодерация": "content_moderation",
+        "модерация_контента": "content_moderation",
         "interject": "creative_interjections",
         "interjections": "creative_interjections",
         "creative": "creative_interjections",
@@ -1568,6 +1579,7 @@ def settings_help(runtime) -> str:
     return (
         "*Настройки*\n"
         f"`ask`: {runtime.ask_context_limit} · "
+        f"`автомодерация`: {'вкл' if runtime.content_moderation_enabled else 'выкл'} · "
         f"`модерация`: {runtime.moderation_context_limit} · "
         f"`web`: {'вкл' if runtime.ask_web_enabled else 'выкл'} · "
         f"`молчуны`: {runtime.silent_support_hours} ч · "
@@ -2236,6 +2248,7 @@ def settings_prompt(runtime) -> str:
     return (
         f"ask_context={runtime.ask_context_limit}\n"
         f"moderation_context={runtime.moderation_context_limit}\n"
+        f"content_moderation={int(runtime.content_moderation_enabled)}\n"
         f"ask_web={int(runtime.ask_web_enabled)}\n"
         f"ask_web_results={runtime.ask_web_results}\n"
         f"silent_hours={runtime.silent_support_hours}\n"
@@ -2271,6 +2284,8 @@ def propose_natural_setting_request(text: str) -> tuple[str, str] | None:
 
     toggle_value = extract_toggle_value(normalized)
     if toggle_value is not None:
+        if any(marker in normalized for marker in ("автомодерац", "модерац", "провер", "контент")):
+            return "content_moderation", str(toggle_value)
         if any(marker in normalized for marker in ("влез", "подшуч", "вмеш", "интервен", "interject")):
             return "creative_interjections", str(toggle_value)
         if "анти" in normalized and "душ" in normalized:
@@ -2297,6 +2312,7 @@ def apply_pending_setting_action(store: BotStore, chat_id: int, name: str, value
         "silent_hours",
         "ask_web",
         "ask_web_results",
+        "content_moderation",
         "creative_interjections",
         "anti_bore",
     }:
