@@ -69,4 +69,44 @@ def download_social_video(url: str, output_dir: Path, max_file_mb: int) -> Path:
     )
     if not candidates:
         raise FileNotFoundError("yt-dlp did not produce a video file")
-    return candidates[0]
+    return transcode_for_telegram(candidates[0], output_dir / "telegram.mp4")
+
+
+def transcode_for_telegram(source: Path, destination: Path) -> Path:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ],
+        check=True,
+        timeout=180,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if not destination.exists():
+        raise FileNotFoundError("ffmpeg did not produce a Telegram video file")
+    return destination
