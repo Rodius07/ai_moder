@@ -20,7 +20,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, FSInputFile
 from aiogram.types import (
     CallbackQuery,
     ChatPermissions,
@@ -38,6 +38,7 @@ from tg_guard_bot.image_generation import ImageGenerator
 from tg_guard_bot.models import ModerationResult, Verdict
 from tg_guard_bot.rules import RuleConfig, RuleEngine
 from tg_guard_bot.settings_webapp import SettingsWebApp
+from tg_guard_bot.social_video import download_social_video, extract_social_video_url
 from tg_guard_bot.state import WarningStore
 from tg_guard_bot.store import BotStore, ModerationCase, StoredChatMessage, UserStats
 from tg_guard_bot.transcription import LocalTranscriber, transcribe_message_media
@@ -161,11 +162,11 @@ async def on_startup(
             BotCommand(command="support", description="поддержать брата ответом на сообщение"),
             BotCommand(command="ask", description="задать вопрос ИИ с контекстом чата"),
             BotCommand(command="transcribe", description="расшифровать голосовое/кружочек"),
+            BotCommand(command="convert", description="скачать Shorts/TikTok как обычное видео"),
             BotCommand(command="image", description="сгенерировать картинку через OpenRouter"),
             BotCommand(command="video", description="сгенерировать видео через OpenRouter"),
             BotCommand(command="appeal", description="апелляция по спорному сообщению"),
             BotCommand(command="report", description="донести на спорное сообщение"),
-            BotCommand(command="donate", description="поддержать работу бота"),
             BotCommand(command="warns", description="мои предупреждения"),
             BotCommand(command="resetstats", description="админ: обнулить счетчики"),
         ]
@@ -234,7 +235,7 @@ async def start(
     await message.answer(
         "*Я на посту братства.*\n"
         "Проверяю чат, слушаю голосовые, помню контекст и иногда мягко хлопаю по плечу.\n\n"
-        "Команды: /settings, /stats, /rules, /ask, /transcribe, /image, /video, /appeal, /report, /donate",
+        "Команды: /settings, /stats, /rules, /ask, /transcribe, /convert, /image, /video, /appeal, /report",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -463,36 +464,8 @@ async def video(
 
 
 @router.message(Command("donate", "donat"))
-async def donate(message: Message, settings: Settings) -> None:
-    balance = await openrouter_balance(settings)
-    await message.answer(render_donation_message(settings, balance), parse_mode=ParseMode.MARKDOWN)
-
-
-def render_donation_message(settings: Settings, balance: float | None = None) -> str:
-    lines = [
-        "*Сбор на жизнь бота*",
-        "",
-        "Если бот хоть раз спас братство от лишнего напряжения, можно докинуть топлива:",
-        "",
-    ]
-    if balance is not None:
-        lines.extend([f"*Баланс OpenRouter:* `${balance:.2f}`", ""])
-    if settings.donation_ton_address:
-        lines.append(f"*TON:* `{settings.donation_ton_address}`")
-    if settings.donation_usdt_address:
-        lines.append(
-            f"*USDT ({md_escape(settings.donation_usdt_network)}):* `{settings.donation_usdt_address}`"
-        )
-    if settings.donation_rub_details:
-        lines.append(f"*Рубли:* `{settings.donation_rub_details}`")
-    if not any((settings.donation_ton_address, settings.donation_usdt_address, settings.donation_rub_details)):
-        lines.append(
-            "Реквизиты пока не заданы в `.env`: `DONATION_TON_ADDRESS`, "
-            "`DONATION_USDT_ADDRESS`, `DONATION_RUB_DETAILS`."
-        )
-    lines.append("")
-    lines.append("Донат добровольный. Разжатость не продается, но сервер сам себя не оплатит.")
-    return "\n".join(lines)
+async def donate(message: Message) -> None:
+    await message.answer("Сбор и реквизиты отключены.")
 
 
 async def openrouter_balance(settings: Settings) -> float | None:
@@ -815,6 +788,26 @@ async def transcribe_command(
     await edit_text_markdown(thinking, text[:3900])
 
 
+@router.message(Command("convert", "shorts", "clip"))
+async def convert_social_video_command(
+    message: Message,
+    command: CommandObject,
+    settings: Settings,
+) -> None:
+    text = command.args or ""
+    if not text and message.reply_to_message:
+        text = message.reply_to_message.text or message.reply_to_message.caption or ""
+    url = extract_social_video_url(text)
+    if not url:
+        await message.answer(
+            "Кинь ссылку после команды или ответь `/convert` на YouTube Shorts/TikTok.",
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True,
+        )
+        return
+    await convert_and_reply_social_video(message, url, settings, manual=True)
+
+
 @router.message(Command("support", "respect"))
 async def support(message: Message, store: BotStore) -> None:
     if not message.from_user:
@@ -1015,6 +1008,8 @@ async def process_group_message(
             transcriber,
         ):
             return
+    if not is_edit and runtime.auto_social_video_enabled and not text.startswith("/"):
+        await maybe_auto_convert_social_video(message, text, settings)
     if not runtime.content_moderation_enabled:
         logger.info(
             "skip automatic content moderation edited=%s chat=%s user=%s",
@@ -1115,6 +1110,53 @@ async def process_group_message(
     finally:
         history.discard_last(message.chat.id, current_history_message)
         store.discard_last_message(message.chat.id, message.from_user.id, text)
+
+
+async def maybe_auto_convert_social_video(message: Message, text: str, settings: Settings) -> None:
+    url = extract_social_video_url(text)
+    if not url:
+        return
+    try:
+        await convert_and_reply_social_video(message, url, settings, manual=False)
+    except Exception:
+        logger.exception("auto social video conversion failed chat=%s", message.chat.id)
+
+
+async def convert_and_reply_social_video(
+    message: Message,
+    url: str,
+    settings: Settings,
+    *,
+    manual: bool,
+) -> None:
+    thinking: Message | None = None
+    if manual:
+        thinking = await message.reply("Скачиваю ролик и собираю обычное видео...")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="tg-guard-social-video-") as temp_dir:
+            video_path = await to_thread(
+                download_social_video,
+                url,
+                Path(temp_dir),
+                settings.max_social_video_file_mb,
+            )
+            await message.reply_video(
+                FSInputFile(video_path),
+                caption="Видео из ссылки.",
+            )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        logger.exception("social video conversion failed url=%s", url)
+        if manual and thinking:
+            await thinking.edit_text(
+                "Не получилось достать видео. Возможно, сервис закрыл доступ, ролик слишком большой "
+                "или ссылка требует авторизацию."
+            )
+        return
+
+    if thinking:
+        with suppress(TelegramBadRequest, TelegramForbiddenError):
+            await thinking.delete()
 
 
 def soften_uncertain_ai_delete(result: ModerationResult) -> ModerationResult:
@@ -1541,6 +1583,11 @@ def normalize_setting_name(name: str) -> str:
         "automod": "content_moderation",
         "автомодерация": "content_moderation",
         "модерация_контента": "content_moderation",
+        "auto_social_video": "auto_social_video",
+        "autovideo": "auto_social_video",
+        "автовидео": "auto_social_video",
+        "шортсы": "auto_social_video",
+        "тикток": "auto_social_video",
         "interject": "creative_interjections",
         "interjections": "creative_interjections",
         "creative": "creative_interjections",
@@ -1580,6 +1627,7 @@ def settings_help(runtime) -> str:
         "*Настройки*\n"
         f"`ask`: {runtime.ask_context_limit} · "
         f"`автомодерация`: {'вкл' if runtime.content_moderation_enabled else 'выкл'} · "
+        f"`авто-видео`: {'вкл' if runtime.auto_social_video_enabled else 'выкл'} · "
         f"`модерация`: {runtime.moderation_context_limit} · "
         f"`web`: {'вкл' if runtime.ask_web_enabled else 'выкл'} · "
         f"`молчуны`: {runtime.silent_support_hours} ч · "
@@ -2249,6 +2297,7 @@ def settings_prompt(runtime) -> str:
         f"ask_context={runtime.ask_context_limit}\n"
         f"moderation_context={runtime.moderation_context_limit}\n"
         f"content_moderation={int(runtime.content_moderation_enabled)}\n"
+        f"auto_social_video={int(runtime.auto_social_video_enabled)}\n"
         f"ask_web={int(runtime.ask_web_enabled)}\n"
         f"ask_web_results={runtime.ask_web_results}\n"
         f"silent_hours={runtime.silent_support_hours}\n"
@@ -2286,6 +2335,8 @@ def propose_natural_setting_request(text: str) -> tuple[str, str] | None:
     if toggle_value is not None:
         if any(marker in normalized for marker in ("автомодерац", "модерац", "провер", "контент")):
             return "content_moderation", str(toggle_value)
+        if any(marker in normalized for marker in ("автовидео", "шорт", "short", "tiktok", "тикток")):
+            return "auto_social_video", str(toggle_value)
         if any(marker in normalized for marker in ("влез", "подшуч", "вмеш", "интервен", "interject")):
             return "creative_interjections", str(toggle_value)
         if "анти" in normalized and "душ" in normalized:
@@ -2313,6 +2364,7 @@ def apply_pending_setting_action(store: BotStore, chat_id: int, name: str, value
         "ask_web",
         "ask_web_results",
         "content_moderation",
+        "auto_social_video",
         "creative_interjections",
         "anti_bore",
     }:
@@ -2659,20 +2711,6 @@ async def daily_schedule_loop(
                     store.mark_morning_message_sent(chat_id, today)
 
         if now.hour != 22 or now.minute != 30:
-            if now.weekday() == 6 and now.hour == 21 and now.minute == 30:
-                week_key = f"{now.isocalendar().year}-{now.isocalendar().week}"
-                for chat_id_text in chat_ids:
-                    chat_id = int(chat_id_text)
-                    runtime = store.settings_for(chat_id)
-                    if runtime.last_weekly_digest_key == week_key:
-                        continue
-                    with suppress(TelegramBadRequest, TelegramForbiddenError):
-                        await bot.send_message(
-                            chat_id,
-                            render_weekly_digest(chat_id, store),
-                            parse_mode=ParseMode.MARKDOWN,
-                        )
-                        store.mark_weekly_digest_sent(chat_id, week_key)
             continue
 
         for chat_id_text in chat_ids:
@@ -2692,23 +2730,6 @@ async def daily_schedule_loop(
                         reply_markup=ass_poll_keyboard(),
                     )
                     store.mark_evening_message_sent(chat_id, today)
-
-            if runtime.last_daily_stats_date == today:
-                continue
-            with suppress(TelegramBadRequest, TelegramForbiddenError):
-                await bot.send_message(
-                    chat_id,
-                    await render_stats(chat_id, store, settings),
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                balance = await openrouter_balance(settings)
-                await bot.send_message(
-                    chat_id,
-                    render_donation_message(settings, balance),
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=True,
-                )
-                store.mark_daily_stats_sent(chat_id, today)
 
 
 def md_escape(value: str) -> str:

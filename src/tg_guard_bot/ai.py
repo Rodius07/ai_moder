@@ -225,9 +225,10 @@ class AiModerator:
                         "Разрешены только параметры: ask_context (3-50), moderation_context "
                         "(3-50), silent_hours (1-720), ask_web (0/1), ask_web_results (1-8), "
                         "anti_bore (0/1), creative_interjections (0/1), "
-                        "content_moderation (0/1). Смена любых AI-моделей запрещена этим "
-                        "способом. Если просьба неявная, двусмысленная или касается модели, "
-                        "верни {\"action\": null, \"value\": null}. Иначе верни JSON "
+                        "content_moderation (0/1), auto_social_video (0/1). Смена любых "
+                        "AI-моделей запрещена этим способом. Если просьба неявная, "
+                        "двусмысленная или касается модели, верни {\"action\": null, "
+                        "\"value\": null}. Иначе верни JSON "
                         "{\"action\": \"имя\", \"value\": \"значение\"}."
                     ),
                 },

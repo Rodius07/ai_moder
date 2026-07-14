@@ -11,6 +11,7 @@ from typing import Any
 @dataclass
 class ChatRuntimeSettings:
     content_moderation_enabled: bool = True
+    auto_social_video_enabled: bool = True
     moderation_context_limit: int = 10
     ask_context_limit: int = 20
     ask_web_enabled: bool = True
@@ -188,6 +189,8 @@ class BotStore:
             settings.creative_interjections_enabled = bool(value)
         elif name == "content_moderation":
             settings.content_moderation_enabled = bool(value)
+        elif name == "auto_social_video":
+            settings.auto_social_video_enabled = bool(value)
         else:
             raise ValueError(f"Unknown setting: {name}")
         self.save()

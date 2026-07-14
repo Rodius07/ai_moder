@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     whisper_compute_type: str = Field("int8", alias="WHISPER_COMPUTE_TYPE")
     whisper_language: str | None = Field("ru", alias="WHISPER_LANGUAGE")
     max_transcription_file_mb: int = Field(25, alias="MAX_TRANSCRIPTION_FILE_MB")
+    max_social_video_file_mb: int = Field(48, alias="MAX_SOCIAL_VIDEO_FILE_MB")
     max_warnings_before_mute: int = Field(3, alias="MAX_WARNINGS_BEFORE_MUTE")
     mute_minutes: int = Field(30, alias="MUTE_MINUTES")
 

@@ -67,6 +67,14 @@ def test_store_toggles_content_moderation(tmp_path) -> None:
     assert settings.content_moderation_enabled is False
 
 
+def test_store_toggles_auto_social_video(tmp_path) -> None:
+    store = BotStore(str(tmp_path / "state.json"))
+
+    settings = store.update_setting(1, "auto_social_video", 0)
+
+    assert settings.auto_social_video_enabled is False
+
+
 def test_store_tracks_daily_and_all_time_violations(tmp_path) -> None:
     store = BotStore(str(tmp_path / "state.json"))
 
