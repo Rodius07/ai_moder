@@ -163,6 +163,8 @@ async def on_startup(
             BotCommand(command="ask", description="задать вопрос ИИ с контекстом чата"),
             BotCommand(command="transcribe", description="расшифровать голосовое/кружочек"),
             BotCommand(command="convert", description="скачать Shorts/TikTok как обычное видео"),
+            BotCommand(command="shorts", description="ответь на Shorts/TikTok или дай ссылку"),
+            BotCommand(command="clip", description="то же самое: ссылка -> видеофайл"),
             BotCommand(command="image", description="сгенерировать картинку через OpenRouter"),
             BotCommand(command="video", description="сгенерировать видео через OpenRouter"),
             BotCommand(command="appeal", description="апелляция по спорному сообщению"),
@@ -235,7 +237,7 @@ async def start(
     await message.answer(
         "*Я на посту братства.*\n"
         "Проверяю чат, слушаю голосовые, помню контекст и иногда мягко хлопаю по плечу.\n\n"
-        "Команды: /settings, /stats, /rules, /ask, /transcribe, /convert, /image, /video, /appeal, /report",
+        "Команды: /settings, /stats, /rules, /ask, /transcribe, /convert, /shorts, /clip, /image, /video, /appeal, /report",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -800,7 +802,11 @@ async def convert_social_video_command(
     url = extract_social_video_url(text)
     if not url:
         await message.answer(
-            "Кинь ссылку после команды или ответь `/convert` на YouTube Shorts/TikTok.",
+            "*Как достать видео из ссылки*\n\n"
+            "- ответь `/shorts` на сообщение с YouTube Shorts или TikTok\n"
+            "- или напиши `/shorts https://youtube.com/shorts/...`\n"
+            "- алиасы: `/convert`, `/clip`\n\n"
+            "Обычные длинные YouTube-ссылки пока не трогаю, только Shorts/TikTok.",
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
         )
@@ -1135,8 +1141,7 @@ async def convert_and_reply_social_video(
 
     try:
         with tempfile.TemporaryDirectory(prefix="tg-guard-social-video-") as temp_dir:
-            video_path = await to_thread(
-                download_social_video,
+            video_path = await download_social_video_with_retries(
                 url,
                 Path(temp_dir),
                 settings.max_social_video_file_mb,
@@ -1145,18 +1150,47 @@ async def convert_and_reply_social_video(
                 FSInputFile(video_path),
                 caption="Видео из ссылки.",
             )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        logger.exception("social video conversion failed url=%s", url)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as error:
+        logger.exception(
+            "social video conversion failed url=%s stderr=%s",
+            url,
+            getattr(error, "stderr", "") or "",
+        )
         if manual and thinking:
             await thinking.edit_text(
                 "Не получилось достать видео. Возможно, сервис закрыл доступ, ролик слишком большой "
-                "или ссылка требует авторизацию."
+                "или ссылка требует авторизацию. Попробуй ещё раз через минуту или кинь другую ссылку."
             )
         return
 
     if thinking:
         with suppress(TelegramBadRequest, TelegramForbiddenError):
             await thinking.delete()
+
+
+async def download_social_video_with_retries(
+    url: str,
+    output_dir: Path,
+    max_file_mb: int,
+) -> Path:
+    last_error: Exception | None = None
+    for attempt in range(2):
+        attempt_dir = output_dir / f"try-{attempt + 1}"
+        try:
+            return await to_thread(download_social_video, url, attempt_dir, max_file_mb)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as error:
+            last_error = error
+            logger.warning(
+                "social video download attempt failed attempt=%s url=%s stderr=%s",
+                attempt + 1,
+                url,
+                getattr(error, "stderr", "") or "",
+            )
+            if attempt == 0:
+                await sleep(2)
+    if last_error:
+        raise last_error
+    raise FileNotFoundError("yt-dlp did not produce a video file")
 
 
 def soften_uncertain_ai_delete(result: ModerationResult) -> ModerationResult:
