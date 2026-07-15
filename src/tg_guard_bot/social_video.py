@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
-from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,6 +20,15 @@ SUPPORTED_HOSTS = {
     "vm.tiktok.com",
     "vt.tiktok.com",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class VideoMetadata:
+    width: int
+    height: int
+    duration: float
+    video_codec: str | None = None
+    audio_codec: str | None = None
 
 
 def extract_social_video_url(text: str) -> str | None:
@@ -43,12 +53,12 @@ def download_social_video(url: str, output_dir: Path, max_file_mb: int) -> Path:
             "-m",
             "yt_dlp",
             "--no-playlist",
-            "--max-filesize",
-            f"{max_file_mb}M",
             "-S",
-            "res:1080,fps,ext:mp4:m4a",
+            "res:1080,fps,vbr,abr",
             "-f",
             (
+                "bv*[vcodec^=avc1][height<=1920][width<=1080]+ba[acodec^=mp4a]/"
+                "b[vcodec^=avc1][height<=1920][width<=1080]/"
                 "bv*[height<=1920][width<=1080]+ba/"
                 "bv*[height<=1920][width<=1080]+ba*/"
                 "b[height<=1920][width<=1080]/best"
@@ -62,7 +72,7 @@ def download_social_video(url: str, output_dir: Path, max_file_mb: int) -> Path:
             url,
         ],
         check=True,
-        timeout=180,
+        timeout=300,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
@@ -74,24 +84,77 @@ def download_social_video(url: str, output_dir: Path, max_file_mb: int) -> Path:
     )
     if not candidates:
         raise FileNotFoundError("yt-dlp did not produce a video file")
-    return transcode_for_telegram(candidates[0], output_dir / "telegram.mp4")
+    return prepare_for_telegram(
+        candidates[0],
+        output_dir / "telegram.mp4",
+        max_file_mb=max_file_mb,
+    )
 
 
-def transcode_for_telegram(source: Path, destination: Path) -> Path:
-    crop_filter = detect_crop_filter(source)
-    filters = []
-    if crop_filter:
-        filters.append(crop_filter)
-    filters.extend(
+def prepare_for_telegram(source: Path, destination: Path, *, max_file_mb: int) -> Path:
+    metadata = probe_video_metadata(source)
+    max_file_bytes = max_file_mb * 1024 * 1024
+    if (
+        metadata.video_codec == "h264"
+        and metadata.audio_codec in {None, "aac"}
+        and source.stat().st_size <= max_file_bytes
+    ):
+        remux_for_telegram(source, destination)
+    else:
+        transcode_for_telegram(
+            source,
+            destination,
+            max_file_bytes=max_file_bytes,
+            duration=metadata.duration,
+        )
+
+    if not destination.exists():
+        raise FileNotFoundError("ffmpeg did not produce a Telegram video file")
+    return destination
+
+
+def remux_for_telegram(source: Path, destination: Path) -> None:
+    subprocess.run(
         [
-            (
-                "scale='if(gt(a,1),min(1280,iw),min(720,iw))':"
-                "'if(gt(a,1),min(720,ih),min(1280,ih))':"
-                "force_original_aspect_ratio=decrease"
-            ),
-            "setsar=1",
-            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-        ]
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ],
+        check=True,
+        timeout=60,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def transcode_for_telegram(
+    source: Path,
+    destination: Path,
+    *,
+    max_file_bytes: int,
+    duration: float,
+) -> None:
+    available_kbps = max_file_bytes * 8 * 0.94 / max(duration, 1.0) / 1000
+    video_kbps = max(400, min(6000, int(available_kbps - 128)))
+    filters = (
+        "scale="
+        "'if(gt(iw,ih),min(1920,iw),min(1080,iw))':"
+        "'if(gt(iw,ih),min(1080,ih),min(1920,ih))':"
+        "force_original_aspect_ratio=decrease,"
+        "setsar=1,pad=ceil(iw/2)*2:ceil(ih/2)*2"
     )
     subprocess.run(
         [
@@ -104,93 +167,46 @@ def transcode_for_telegram(source: Path, destination: Path) -> Path:
             "-map",
             "0:a?",
             "-vf",
-            ",".join(filters),
+            filters,
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            "medium",
             "-crf",
-            "21",
+            "18",
             "-maxrate",
-            "2400k",
+            f"{video_kbps}k",
             "-bufsize",
-            "4800k",
+            f"{video_kbps * 2}k",
             "-pix_fmt",
             "yuv420p",
             "-c:a",
             "aac",
             "-b:a",
-            "96k",
+            "128k",
             "-movflags",
             "+faststart",
             str(destination),
         ],
         check=True,
-        timeout=180,
+        timeout=300,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
     )
-    if not destination.exists():
-        raise FileNotFoundError("ffmpeg did not produce a Telegram video file")
-    return destination
 
 
-def detect_crop_filter(source: Path) -> str | None:
-    try:
-        process = subprocess.run(
-            [
-                "ffmpeg",
-                "-ss",
-                "2",
-                "-i",
-                str(source),
-                "-t",
-                "12",
-                "-vf",
-                "cropdetect=limit=24:round=2:reset=0",
-                "-f",
-                "null",
-                "-",
-            ],
-            check=False,
-            timeout=40,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-
-    crops = re.findall(r"crop=(\d+:\d+:\d+:\d+)", process.stderr or "")
-    if not crops:
-        return None
-    crop = Counter(crops).most_common(1)[0][0]
-    width, height, *_ = (int(part) for part in crop.split(":"))
-    source_width, source_height = probe_video_size(source)
-    if not source_width or not source_height:
-        return f"crop={crop}"
-
-    source_area = source_width * source_height
-    crop_area = width * height
-    if crop_area >= source_area * 0.96 or crop_area <= source_area * 0.25:
-        return None
-    return f"crop={crop}"
-
-
-def probe_video_size(source: Path) -> tuple[int | None, int | None]:
+def probe_video_metadata(source: Path) -> VideoMetadata:
     try:
         process = subprocess.run(
             [
                 "ffprobe",
                 "-v",
                 "error",
-                "-select_streams",
-                "v:0",
                 "-show_entries",
-                "stream=width,height",
+                "stream=codec_type,codec_name,width,height:format=duration",
                 "-of",
-                "csv=p=0:s=x",
+                "json",
                 str(source),
             ],
             check=True,
@@ -199,9 +215,23 @@ def probe_video_size(source: Path) -> tuple[int | None, int | None]:
             stderr=subprocess.DEVNULL,
             text=True,
         )
-    except (subprocess.SubprocessError, OSError):
-        return None, None
-    match = re.search(r"(\d+)x(\d+)", process.stdout)
-    if not match:
-        return None, None
-    return int(match.group(1)), int(match.group(2))
+        payload = json.loads(process.stdout)
+    except (json.JSONDecodeError, subprocess.SubprocessError, OSError) as error:
+        raise ValueError(f"could not inspect video metadata: {source}") from error
+
+    streams = payload.get("streams", [])
+    video = next((item for item in streams if item.get("codec_type") == "video"), None)
+    audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
+    if not video or not video.get("width") or not video.get("height"):
+        raise ValueError(f"video stream not found: {source}")
+    try:
+        duration = float(payload.get("format", {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    return VideoMetadata(
+        width=int(video["width"]),
+        height=int(video["height"]),
+        duration=max(0.0, duration),
+        video_codec=video.get("codec_name"),
+        audio_codec=audio.get("codec_name") if audio else None,
+    )

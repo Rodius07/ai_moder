@@ -38,7 +38,11 @@ from tg_guard_bot.image_generation import ImageGenerator
 from tg_guard_bot.models import ModerationResult, Verdict
 from tg_guard_bot.rules import RuleConfig, RuleEngine
 from tg_guard_bot.settings_webapp import SettingsWebApp
-from tg_guard_bot.social_video import download_social_video, extract_social_video_url
+from tg_guard_bot.social_video import (
+    download_social_video,
+    extract_social_video_url,
+    probe_video_metadata,
+)
 from tg_guard_bot.state import WarningStore
 from tg_guard_bot.store import BotStore, ModerationCase, StoredChatMessage, UserStats
 from tg_guard_bot.transcription import LocalTranscriber, transcribe_message_media
@@ -1146,11 +1150,22 @@ async def convert_and_reply_social_video(
                 Path(temp_dir),
                 settings.max_social_video_file_mb,
             )
+            metadata = await to_thread(probe_video_metadata, video_path)
             await message.reply_video(
                 FSInputFile(video_path),
                 caption="Видео из ссылки.",
+                duration=max(1, round(metadata.duration)),
+                width=metadata.width,
+                height=metadata.height,
+                supports_streaming=True,
             )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as error:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+        OSError,
+        ValueError,
+    ) as error:
         logger.exception(
             "social video conversion failed url=%s stderr=%s",
             url,
